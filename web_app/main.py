@@ -627,6 +627,82 @@ def build_api_input(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     ]
 
 
+def search_vector_store_context(
+    client: OpenAI,
+    vector_store_id: str,
+    question: str,
+) -> tuple[str, list[str]]:
+    """
+    Tìm trực tiếp trong kho bằng nhiều cách diễn đạt.
+    Cách này ổn định hơn việc chỉ chờ model tự quyết định truy vấn file_search.
+    """
+    expanded_queries = [
+        question,
+        (
+            question
+            + " họ tên tên cá nhân chức danh chức vụ lãnh đạo "
+              "Chi cục trưởng Phó Chi cục trưởng trưởng phòng phó trưởng phòng"
+        ),
+        (
+            "danh sách cán bộ công chức viên chức; họ và tên; chức vụ; "
+            "chức danh; đơn vị công tác; cơ cấu tổ chức Chi cục Thủy lợi"
+        ),
+    ]
+
+    collected: list[tuple[float, str, str]] = []
+    seen_chunks: set[str] = set()
+
+    for query in expanded_queries:
+        try:
+            page = client.vector_stores.search(
+                vector_store_id=vector_store_id,
+                query=query,
+            )
+        except Exception:
+            continue
+
+        for result in getattr(page, "data", []) or []:
+            filename = getattr(result, "filename", "") or "Tài liệu không rõ tên"
+            score = float(getattr(result, "score", 0.0) or 0.0)
+
+            parts: list[str] = []
+            for item in getattr(result, "content", []) or []:
+                item_text = getattr(item, "text", "") or ""
+                if item_text.strip():
+                    parts.append(item_text.strip())
+
+            chunk_text = "\n".join(parts).strip()
+            if not chunk_text:
+                continue
+
+            fingerprint = f"{filename}|{chunk_text[:300]}"
+            if fingerprint in seen_chunks:
+                continue
+
+            seen_chunks.add(fingerprint)
+            collected.append((score, filename, chunk_text))
+
+    collected.sort(key=lambda row: row[0], reverse=True)
+    selected = collected[:16]
+
+    if not selected:
+        return "", []
+
+    filenames: list[str] = []
+    context_blocks: list[str] = []
+
+    for index, (score, filename, chunk_text) in enumerate(selected, start=1):
+        if filename not in filenames:
+            filenames.append(filename)
+
+        context_blocks.append(
+            f"[Kết quả {index} | Tài liệu: {filename} | Điểm: {score:.3f}]\n"
+            f"{chunk_text}"
+        )
+
+    return "\n\n".join(context_blocks), filenames
+
+
 def stream_openai_answer(
     client: OpenAI,
     database: dict[str, Any],
@@ -637,46 +713,73 @@ def stream_openai_answer(
 ):
     model = FAST_MODEL if fast_mode else DEEP_MODEL
 
-    request: dict[str, Any] = {
-        "model": model,
-        "instructions": SYSTEM_INSTRUCTIONS,
-        "input": build_api_input(messages),
-        "stream": True,
-        "reasoning": {"effort": "minimal" if fast_mode else "medium"},
-        "text": {"verbosity": "low" if fast_mode else "high"},
-        "max_output_tokens": 900 if fast_mode else 2400,
-    }
-
-    vector_store_id = (
-        get_configured_vector_store_id()
-        or database.get("vector_store_id", "").strip()
-    )
+    api_input = build_api_input(messages)
+    instructions = SYSTEM_INSTRUCTIONS
 
     if use_file_search:
+        vector_store_id = (
+            get_configured_vector_store_id()
+            or database.get("vector_store_id", "").strip()
+        )
         if not vector_store_id:
             raise RuntimeError(
                 "Chưa xác định được OPENAI_VECTOR_STORE_ID cho kho tài liệu."
             )
 
-        request["tools"] = [
-            {
-                "type": "file_search",
-                "vector_store_ids": [vector_store_id],
-                "max_num_results": 12,
-            }
-        ]
-        request["tool_choice"] = "required"
-        request["instructions"] = (
-            SYSTEM_INSTRUCTIONS
-            + """
+        latest_question = ""
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                latest_question = str(message.get("content", "")).strip()
+                break
 
-YÊU CẦU BẮT BUỘC KHI Ở CHẾ ĐỘ CHUYÊN SÂU:
-- Trước khi trả lời, phải tìm kiếm trong kho tài liệu bằng file_search.
-- Chỉ kết luận theo nội dung tìm thấy trong tài liệu.
-- Nếu không tìm thấy căn cứ, nói rõ chưa tìm thấy trong kho; không tự suy đoán.
-- Khi có thể, nêu tên tài liệu đã dùng để trả lời.
-"""
+        retrieved_context, source_files = search_vector_store_context(
+            client,
+            vector_store_id,
+            latest_question,
         )
+
+        if retrieved_context:
+            api_input.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Dưới đây là các đoạn được tìm trực tiếp từ kho tài liệu. "
+                        "Hãy đối chiếu kỹ, ưu tiên bảng/danh sách có họ tên và chức danh. "
+                        "Không được nói rằng chưa tìm thấy nếu thông tin đã xuất hiện "
+                        "trong các đoạn này.\n\n"
+                        f"{retrieved_context}"
+                    ),
+                }
+            )
+
+            source_text = ", ".join(source_files)
+            instructions += f"""
+
+YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
+- Các đoạn trích từ kho đã được đưa trực tiếp vào đầu vào.
+- Đọc kỹ cả bảng, danh sách, dòng có họ tên, chức danh và ngày tháng.
+- Trả lời đúng câu hỏi của người dùng, không bỏ qua thông tin nằm ở cuối dòng hoặc cột.
+- Cuối câu trả lời ghi: "Tài liệu đã tra: {source_text}".
+- Nếu các đoạn có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
+"""
+        else:
+            instructions += """
+
+YÊU CẦU TRẢ LỜI:
+- Không tìm thấy đoạn phù hợp trong lần tra cứu trực tiếp.
+- Nói rõ có thể tài liệu chưa được trích xuất chữ đầy đủ, nhất là file .doc cũ,
+  tài liệu scan hoặc nội dung nằm trong bảng phức tạp.
+"""
+
+    request: dict[str, Any] = {
+        "model": model,
+        "instructions": instructions,
+        "input": api_input,
+        "stream": True,
+        "reasoning": {"effort": "minimal" if fast_mode else "medium"},
+        "text": {"verbosity": "low" if fast_mode else "high"},
+        "max_output_tokens": 900 if fast_mode else 2600,
+    }
 
     stream = client.responses.create(**request)
 
