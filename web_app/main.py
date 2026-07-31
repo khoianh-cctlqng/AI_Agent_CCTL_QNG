@@ -215,6 +215,58 @@ st.markdown(
         line-height: 1.45;
     }
 
+    /* GIAO DIỆN HỘI THOẠI THEO MẪU ĐÃ THỐNG NHẤT */
+    div[data-testid="stChatMessage"] {
+        border: 1px solid #e4e8ee !important;
+        border-radius: 18px !important;
+        padding: 0.78rem 0.9rem !important;
+        margin-bottom: 0.72rem !important;
+        background: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.035);
+    }
+
+    div[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background: #ffffff !important;
+        border-color: #ead9ab !important;
+    }
+
+    div[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarUser"],
+    div[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarAssistant"] {
+        width: 2.35rem !important;
+        height: 2.35rem !important;
+        min-width: 2.35rem !important;
+        border-radius: 12px !important;
+        border: 1px solid #dde3ea;
+        background: #f8fafc !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 1.35rem !important;
+        box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+    }
+
+    div[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarUser"] {
+        background: #fff8dc !important;
+        border-color: #f0c85a !important;
+    }
+
+    div[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarAssistant"] {
+        background: #eef7ff !important;
+        border-color: #cfe6fb !important;
+    }
+
+    div[data-testid="stChatMessage"] p,
+    div[data-testid="stChatMessage"] li {
+        font-size: 0.97rem;
+        line-height: 1.58;
+    }
+
+    div[data-testid="stChatInput"] > div {
+        border-radius: 24px !important;
+        border: 1px solid #d8dee6 !important;
+        box-shadow: 0 6px 22px rgba(15, 23, 42, 0.08) !important;
+    }
+
     @media (max-width: 900px) {
         [data-testid="stMainBlockContainer"] {
             padding-top: 1rem;
@@ -753,7 +805,7 @@ else:
         st.caption(f"Đã ẩn {hidden_count} tin nhắn cũ để tăng tốc hiển thị.")
 
     for message in visible_messages:
-        avatar = "👤" if message["role"] == "user" else "💧"
+        avatar = "👨🏻" if message["role"] == "user" else "💧"
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"])
 
