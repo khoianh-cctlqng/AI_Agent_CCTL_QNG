@@ -456,6 +456,11 @@ def load_database() -> dict[str, Any]:
     database.setdefault("vector_store_id", DEFAULT_VECTOR_STORE_ID)
     database.setdefault("uploaded_files", [])
     database.setdefault("conversations", {})
+
+    configured_vector_store_id = get_configured_vector_store_id()
+    if configured_vector_store_id:
+        database["vector_store_id"] = configured_vector_store_id
+
     return database
 
 
@@ -522,6 +527,20 @@ def get_api_key() -> str:
     return secret_key or os.getenv("OPENAI_API_KEY", "")
 
 
+def get_configured_vector_store_id() -> str:
+    """Đọc ID kho tài liệu cố định từ Streamlit Secrets hoặc biến môi trường."""
+    try:
+        secret_id = st.secrets.get("OPENAI_VECTOR_STORE_ID", "")
+    except Exception:
+        secret_id = ""
+
+    return (
+        str(secret_id).strip()
+        or os.getenv("OPENAI_VECTOR_STORE_ID", "").strip()
+        or DEFAULT_VECTOR_STORE_ID
+    )
+
+
 @st.cache_resource(show_spinner=False)
 def create_openai_client(api_key: str) -> OpenAI:
     return OpenAI(
@@ -542,6 +561,12 @@ def get_client() -> OpenAI:
 
 
 def ensure_vector_store(client: OpenAI, database: dict[str, Any]) -> str:
+    configured_vector_store_id = get_configured_vector_store_id()
+    if configured_vector_store_id:
+        database["vector_store_id"] = configured_vector_store_id
+        save_database(database)
+        return configured_vector_store_id
+
     vector_store_id = database.get("vector_store_id", "").strip()
     if vector_store_id:
         return vector_store_id
@@ -622,15 +647,36 @@ def stream_openai_answer(
         "max_output_tokens": 900 if fast_mode else 2400,
     }
 
-    vector_store_id = database.get("vector_store_id", "").strip()
-    if use_file_search and vector_store_id:
+    vector_store_id = (
+        get_configured_vector_store_id()
+        or database.get("vector_store_id", "").strip()
+    )
+
+    if use_file_search:
+        if not vector_store_id:
+            raise RuntimeError(
+                "Chưa xác định được OPENAI_VECTOR_STORE_ID cho kho tài liệu."
+            )
+
         request["tools"] = [
             {
                 "type": "file_search",
                 "vector_store_ids": [vector_store_id],
-                "max_num_results": 8,
+                "max_num_results": 12,
             }
         ]
+        request["tool_choice"] = "required"
+        request["instructions"] = (
+            SYSTEM_INSTRUCTIONS
+            + """
+
+YÊU CẦU BẮT BUỘC KHI Ở CHẾ ĐỘ CHUYÊN SÂU:
+- Trước khi trả lời, phải tìm kiếm trong kho tài liệu bằng file_search.
+- Chỉ kết luận theo nội dung tìm thấy trong tài liệu.
+- Nếu không tìm thấy căn cứ, nói rõ chưa tìm thấy trong kho; không tự suy đoán.
+- Khi có thể, nêu tên tài liệu đã dùng để trả lời.
+"""
+        )
 
     stream = client.responses.create(**request)
 
@@ -768,6 +814,29 @@ with st.sidebar:
         with st.expander(f"{len(database['uploaded_files'])} tài liệu đã nạp"):
             for file_info in database["uploaded_files"][-20:]:
                 st.caption(f"• {file_info['name']}")
+
+    if st.button(
+        "🔎 Kiểm tra kho tài liệu",
+        use_container_width=True,
+        help="Kiểm tra trực tiếp trạng thái kho tài liệu trên OpenAI.",
+    ):
+        try:
+            client = get_client()
+            vector_store_id = ensure_vector_store(client, database)
+            vector_store = client.vector_stores.retrieve(
+                vector_store_id=vector_store_id
+            )
+            counts = vector_store.file_counts
+            st.success(
+                "Kho đang hoạt động — "
+                f"Hoàn tất: {counts.completed}; "
+                f"Đang xử lý: {counts.in_progress}; "
+                f"Lỗi: {counts.failed}; "
+                f"Tổng: {counts.total}."
+            )
+            st.caption(f"Vector Store ID: {vector_store_id}")
+        except Exception as error:
+            st.error(f"Không kiểm tra được kho tài liệu: {error}")
 
     st.divider()
     current_model = FAST_MODEL if fast_mode else DEEP_MODEL
