@@ -245,30 +245,30 @@ st.markdown(
     }
 
     .welcome-title {
-        font-size: clamp(1.45rem, 4.7vw, 2.2rem);
+        font-size: clamp(1.25rem, 4.15vw, 1.95rem);
         line-height: 1;
         font-weight: 800;
         letter-spacing: -0.025em;
-        color: #111111;
-        margin: 0 0 0.45rem;
+        color: #0057A8;
+        margin: 0 0 0.32rem;
     }
 
     .welcome-card {
         width: min(100%, 590px);
-        margin: 0 auto 0.5rem;
-        padding: 0.7rem 0.85rem;
+        margin: 0 auto 0.38rem;
+        padding: 0.58rem 0.72rem;
         border: 1px solid #e6e6e6;
-        border-radius: 18px;
+        border-radius: 16px;
         background: rgba(255,255,255,0.98);
-        box-shadow: 0 2px 9px rgba(15, 23, 42, 0.045);
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
         color: #222222;
-        font-size: clamp(0.82rem, 2.95vw, 1rem);
-        line-height: 1.28;
+        font-size: clamp(0.76rem, 2.65vw, 0.92rem);
+        line-height: 1.19;
     }
 
     .welcome-card-large {
-        padding-top: 0.72rem;
-        padding-bottom: 0.72rem;
+        padding-top: 0.56rem;
+        padding-bottom: 0.56rem;
     }
 
     /* Khi chưa có hội thoại, tạo khoảng thở như mẫu */
@@ -292,27 +292,28 @@ st.markdown(
         }
 
         .welcome-logo {
-            width: 72px;
-            height: 72px;
-            margin-bottom: 0.08rem;
+            width: 68px;
+            height: 68px;
+            margin-bottom: 0.05rem;
         }
 
         .welcome-title {
-            font-size: 1.42rem;
-            margin-bottom: 0.3rem;
+            font-size: 1.25rem;
+            margin-bottom: 0.24rem;
+            color: #0057A8;
         }
 
         .welcome-card {
-            border-radius: 16px;
-            padding: 0.52rem 0.68rem;
-            margin-bottom: 0.38rem;
-            font-size: 0.82rem;
-            line-height: 1.22;
+            border-radius: 15px;
+            padding: 0.46rem 0.6rem;
+            margin-bottom: 0.32rem;
+            font-size: 0.76rem;
+            line-height: 1.16;
         }
 
         .welcome-card-large {
-            padding-top: 0.58rem;
-            padding-bottom: 0.58rem;
+            padding-top: 0.5rem;
+            padding-bottom: 0.5rem;
         }
 
         div[data-testid="stChatInput"] {
@@ -321,14 +322,14 @@ st.markdown(
         }
 
         div[data-testid="stChatInput"] > div {
-            min-height: 54px;
-            border-radius: 27px !important;
+            min-height: 50px;
+            border-radius: 25px !important;
             box-shadow: none;
         }
 
         [data-testid="stChatInputTextArea"] {
-            font-size: 0.88rem !important;
-            line-height: 1.15 !important;
+            font-size: 0.84rem !important;
+            line-height: 1.12 !important;
         }
     }
 
