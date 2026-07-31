@@ -1,0 +1,6 @@
+﻿.venv/
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+web_app/data/
+Git-*.exe
