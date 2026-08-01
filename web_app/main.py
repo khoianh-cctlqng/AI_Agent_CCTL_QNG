@@ -1037,6 +1037,7 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Cuối câu trả lời ghi chính xác: "Tài liệu đã tra: {source_text}".
 - Chỉ dùng đúng tên tài liệu trong dòng trên; không tự thay bằng tên tạm kiểu tmp... hoặc tên do hệ thống suy đoán.
 - Nếu có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
+- Phải kết thúc trọn câu, trọn ý; không dừng giữa câu hoặc giữa danh sách.
 """
         else:
             instructions += """
@@ -1054,7 +1055,7 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
         "stream": True,
         "reasoning": {"effort": "minimal" if fast_mode else "medium"},
         "text": {"verbosity": "low" if fast_mode else "high"},
-        "max_output_tokens": 900 if fast_mode else 3000,
+        "max_output_tokens": 1400 if fast_mode else 5000,
     }
 
     if use_file_search and vector_store_id:
@@ -1610,19 +1611,27 @@ if question:
             effective_file_search = use_file_search or auto_document_search
             effective_fast_mode = fast_mode and not effective_file_search
 
-            answer = st.write_stream(
-                stream_openai_answer(
+            # Thu toàn bộ nội dung trước rồi mới hiển thị một lần.
+            # Cách này tránh hiện tượng chữ/bullet bị ngắt quãng khi mạng chậm
+            # hoặc từng delta Markdown được Streamlit vẽ chưa trọn vẹn.
+            with st.spinner("Đang tổng hợp câu trả lời..."):
+                answer_parts: list[str] = []
+                for text_delta in stream_openai_answer(
                     client,
                     database,
                     current_messages,
                     use_file_search=effective_file_search,
                     fast_mode=effective_fast_mode,
-                )
-            )
+                ):
+                    if text_delta:
+                        answer_parts.append(str(text_delta))
+
+                answer = "".join(answer_parts).strip()
 
             if not answer:
                 answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
-                st.markdown(answer)
+
+            st.markdown(answer)
 
         except Exception as error:
             answer = (
