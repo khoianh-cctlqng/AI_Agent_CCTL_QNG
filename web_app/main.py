@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import httpx
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -631,10 +632,13 @@ def search_vector_store_context(
     client: OpenAI,
     vector_store_id: str,
     question: str,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[dict[str, Any]]]:
     """
     Tìm trực tiếp trong kho bằng nhiều cách diễn đạt.
-    Cách này ổn định hơn việc chỉ chờ model tự quyết định truy vấn file_search.
+    Trả về:
+    - các đoạn liên quan;
+    - tên tài liệu;
+    - danh sách file ứng viên để có thể đọc toàn bộ khi cần.
     """
     expanded_queries = [
         question,
@@ -649,7 +653,7 @@ def search_vector_store_context(
         ),
     ]
 
-    collected: list[tuple[float, str, str]] = []
+    collected: list[tuple[float, str, str, str]] = []
     seen_chunks: set[str] = set()
 
     for query in expanded_queries:
@@ -657,11 +661,14 @@ def search_vector_store_context(
             page = client.vector_stores.search(
                 vector_store_id=vector_store_id,
                 query=query,
+                max_num_results=20,
+                rewrite_query=True,
             )
         except Exception:
             continue
 
         for result in getattr(page, "data", []) or []:
+            file_id = getattr(result, "file_id", "") or ""
             filename = getattr(result, "filename", "") or "Tài liệu không rõ tên"
             score = float(getattr(result, "score", 0.0) or 0.0)
 
@@ -675,32 +682,155 @@ def search_vector_store_context(
             if not chunk_text:
                 continue
 
-            fingerprint = f"{filename}|{chunk_text[:300]}"
+            fingerprint = f"{file_id}|{chunk_text[:300]}"
             if fingerprint in seen_chunks:
                 continue
 
             seen_chunks.add(fingerprint)
-            collected.append((score, filename, chunk_text))
+            collected.append((score, file_id, filename, chunk_text))
 
     collected.sort(key=lambda row: row[0], reverse=True)
-    selected = collected[:16]
+    selected = collected[:20]
 
     if not selected:
-        return "", []
+        return "", [], []
 
     filenames: list[str] = []
+    candidates_by_file: dict[str, dict[str, Any]] = {}
     context_blocks: list[str] = []
 
-    for index, (score, filename, chunk_text) in enumerate(selected, start=1):
+    for index, (score, file_id, filename, chunk_text) in enumerate(selected, start=1):
         if filename not in filenames:
             filenames.append(filename)
+
+        if file_id:
+            current = candidates_by_file.get(file_id)
+            if current is None or score > current["score"]:
+                candidates_by_file[file_id] = {
+                    "file_id": file_id,
+                    "filename": filename,
+                    "score": score,
+                }
 
         context_blocks.append(
             f"[Kết quả {index} | Tài liệu: {filename} | Điểm: {score:.3f}]\n"
             f"{chunk_text}"
         )
 
-    return "\n\n".join(context_blocks), filenames
+    candidates = sorted(
+        candidates_by_file.values(),
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    return "\n\n".join(context_blocks), filenames, candidates
+
+
+def should_read_full_document(question: str) -> bool:
+    """
+    Các câu hỏi cần rà soát đầy đủ thường dễ bị bỏ sót nếu chỉ dùng vài đoạn RAG.
+    """
+    normalized = " ".join(question.lower().split())
+    trigger_terms = [
+        "ai ",
+        "là ai",
+        "họ tên",
+        "tên và chức danh",
+        "chức danh",
+        "chức vụ",
+        "danh sách",
+        "liệt kê",
+        "từng cá nhân",
+        "từng người",
+        "bao nhiêu",
+        "mấy ",
+        "toàn bộ",
+        "đầy đủ",
+        "cuối tài liệu",
+        "phía sau",
+        "trong bảng",
+        "phụ lục",
+    ]
+    return any(term in normalized for term in trigger_terms)
+
+
+def fetch_parsed_vector_file_content(
+    api_key: str,
+    vector_store_id: str,
+    file_id: str,
+) -> str:
+    """
+    Lấy toàn bộ phần nội dung đã được OpenAI phân tích của một file trong Vector Store.
+    Đây là lớp dự phòng khi tìm kiếm theo đoạn có nguy cơ bỏ sót bảng hoặc danh sách.
+    """
+    url = (
+        f"https://api.openai.com/v1/vector_stores/"
+        f"{vector_store_id}/files/{file_id}/content"
+    )
+
+    response = httpx.get(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    parts: list[str] = []
+    for item in payload.get("content", []) or []:
+        item_text = item.get("text", "")
+        if item_text and item_text.strip():
+            parts.append(item_text.strip())
+
+    return "\n\n".join(parts)
+
+
+def build_full_document_context(
+    api_key: str,
+    vector_store_id: str,
+    candidates: list[dict[str, Any]],
+    *,
+    max_files: int = 2,
+    max_total_chars: int = 120_000,
+) -> tuple[str, list[str]]:
+    """
+    Đọc toàn bộ nội dung đã phân tích của tối đa vài file phù hợp nhất.
+    Có giới hạn ký tự để tránh đầu vào quá lớn và chi phí không cần thiết.
+    """
+    blocks: list[str] = []
+    filenames: list[str] = []
+    total_chars = 0
+
+    for candidate in candidates[:max_files]:
+        file_id = candidate.get("file_id", "")
+        filename = candidate.get("filename", "Tài liệu không rõ tên")
+        if not file_id:
+            continue
+
+        try:
+            full_text = fetch_parsed_vector_file_content(
+                api_key,
+                vector_store_id,
+                file_id,
+            )
+        except Exception:
+            continue
+
+        if not full_text.strip():
+            continue
+
+        remaining = max_total_chars - total_chars
+        if remaining <= 0:
+            break
+
+        clipped = full_text[:remaining]
+        blocks.append(
+            f"[TOÀN VĂN ĐÃ PHÂN TÍCH | Tài liệu: {filename}]\n{clipped}"
+        )
+        filenames.append(filename)
+        total_chars += len(clipped)
+
+    return "\n\n".join(blocks), filenames
 
 
 def stream_openai_answer(
@@ -732,43 +862,79 @@ def stream_openai_answer(
                 latest_question = str(message.get("content", "")).strip()
                 break
 
-        retrieved_context, source_files = search_vector_store_context(
+        (
+            retrieved_context,
+            source_files,
+            candidates,
+        ) = search_vector_store_context(
             client,
             vector_store_id,
             latest_question,
         )
 
+        full_document_context = ""
+        full_document_files: list[str] = []
+
+        # Với câu hỏi dạng danh sách, nhân sự, chức danh, số lượng...
+        # đọc thêm toàn bộ 2 file phù hợp nhất để hạn chế bỏ sót bảng và phần cuối.
+        if candidates and should_read_full_document(latest_question):
+            full_document_context, full_document_files = build_full_document_context(
+                get_api_key(),
+                vector_store_id,
+                candidates,
+                max_files=2,
+                max_total_chars=120_000,
+            )
+
+        combined_context_parts: list[str] = []
         if retrieved_context:
+            combined_context_parts.append(
+                "CÁC ĐOẠN TÌM KIẾM LIÊN QUAN:\n" + retrieved_context
+            )
+        if full_document_context:
+            combined_context_parts.append(
+                "NỘI DUNG TOÀN FILE DỰ PHÒNG:\n" + full_document_context
+            )
+
+        combined_context = "\n\n".join(combined_context_parts).strip()
+
+        if combined_context:
             api_input.append(
                 {
                     "role": "user",
                     "content": (
-                        "Dưới đây là các đoạn được tìm trực tiếp từ kho tài liệu. "
-                        "Hãy đối chiếu kỹ, ưu tiên bảng/danh sách có họ tên và chức danh. "
-                        "Không được nói rằng chưa tìm thấy nếu thông tin đã xuất hiện "
-                        "trong các đoạn này.\n\n"
-                        f"{retrieved_context}"
+                        "Dưới đây là kết quả tra cứu từ kho tài liệu. "
+                        "Một số file phù hợp nhất đã được đọc toàn bộ phần nội dung "
+                        "mà OpenAI phân tích. Hãy kiểm tra kỹ bảng, danh sách, phần cuối "
+                        "tài liệu, họ tên, chức danh, ngày tháng và các dòng liền kề.\n\n"
+                        f"{combined_context}"
                     ),
                 }
             )
 
-            source_text = ", ".join(source_files)
+            all_sources: list[str] = []
+            for name in source_files + full_document_files:
+                if name not in all_sources:
+                    all_sources.append(name)
+
+            source_text = ", ".join(all_sources)
             instructions += f"""
 
 YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
-- Các đoạn trích từ kho đã được đưa trực tiếp vào đầu vào.
-- Đọc kỹ cả bảng, danh sách, dòng có họ tên, chức danh và ngày tháng.
-- Trả lời đúng câu hỏi của người dùng, không bỏ qua thông tin nằm ở cuối dòng hoặc cột.
+- Ưu tiên nội dung toàn file dự phòng nếu có.
+- Đọc kỹ cả bảng, danh sách, dòng liền trước và liền sau.
+- Ghép đúng họ tên với chức danh và mốc thời gian tương ứng.
+- Không được nói chưa tìm thấy nếu thông tin đã xuất hiện trong nội dung cung cấp.
+- Không tự suy đoán ngoài tài liệu.
 - Cuối câu trả lời ghi: "Tài liệu đã tra: {source_text}".
-- Nếu các đoạn có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
+- Nếu có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
 """
         else:
             instructions += """
 
 YÊU CẦU TRẢ LỜI:
-- Không tìm thấy đoạn phù hợp trong lần tra cứu trực tiếp.
-- Nói rõ có thể tài liệu chưa được trích xuất chữ đầy đủ, nhất là file .doc cũ,
-  tài liệu scan hoặc nội dung nằm trong bảng phức tạp.
+- Chưa lấy được nội dung phù hợp từ kho.
+- Nêu rõ khả năng file scan, file .doc cũ hoặc bảng phức tạp chưa được trích xuất chữ đầy đủ.
 """
 
     request: dict[str, Any] = {
@@ -778,7 +944,7 @@ YÊU CẦU TRẢ LỜI:
         "stream": True,
         "reasoning": {"effort": "minimal" if fast_mode else "medium"},
         "text": {"verbosity": "low" if fast_mode else "high"},
-        "max_output_tokens": 900 if fast_mode else 2600,
+        "max_output_tokens": 900 if fast_mode else 3000,
     }
 
     stream = client.responses.create(**request)
