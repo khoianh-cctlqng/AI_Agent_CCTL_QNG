@@ -1197,8 +1197,108 @@ with st.sidebar:
 
     if database["uploaded_files"]:
         with st.expander(f"{len(database['uploaded_files'])} tài liệu đã nạp"):
-            for file_info in database["uploaded_files"][-20:]:
-                st.caption(f"• {file_info['name']}")
+            visible_files = list(reversed(database["uploaded_files"][-20:]))
+
+            for index, file_info in enumerate(visible_files):
+                file_id = str(file_info.get("openai_file_id", "")).strip()
+                file_name = str(file_info.get("name", "Tài liệu không rõ tên"))
+
+                col_name, col_delete = st.columns([8, 1])
+                with col_name:
+                    st.caption(f"• {file_name}")
+
+                with col_delete:
+                    if st.button(
+                        "🗑️",
+                        key=f"request_delete_document_{file_id}_{index}",
+                        help=f"Yêu cầu xóa {file_name}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["pending_delete_document"] = {
+                            "file_id": file_id,
+                            "file_name": file_name,
+                        }
+                        st.rerun()
+
+            pending_delete = st.session_state.get("pending_delete_document")
+            if pending_delete:
+                pending_file_id = str(
+                    pending_delete.get("file_id", "")
+                ).strip()
+                pending_file_name = str(
+                    pending_delete.get("file_name", "Tài liệu")
+                )
+
+                st.warning(
+                    f"Xác nhận xóa **{pending_file_name}** khỏi kho tài liệu? "
+                    "Thao tác này sẽ làm Agent không còn tra cứu file này."
+                )
+                confirm_col, cancel_col = st.columns(2)
+
+                with confirm_col:
+                    if st.button(
+                        "Xóa tài liệu",
+                        key="confirm_delete_document",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            if not pending_file_id:
+                                raise RuntimeError(
+                                    "Tài liệu không có OpenAI file ID để xóa."
+                                )
+
+                            client = get_client()
+                            vector_store_id = ensure_vector_store(
+                                client,
+                                database,
+                            )
+
+                            # Gỡ khỏi Vector Store để Agent ngừng tra cứu.
+                            client.vector_stores.files.delete(
+                                vector_store_id=vector_store_id,
+                                file_id=pending_file_id,
+                            )
+
+                            # Xóa file gốc khỏi OpenAI để tránh lưu thừa.
+                            try:
+                                client.files.delete(pending_file_id)
+                            except Exception:
+                                # File đã được gỡ khỏi kho là yêu cầu chính;
+                                # lỗi xóa bản gốc không làm hỏng danh sách kho.
+                                pass
+
+                            database["uploaded_files"] = [
+                                item
+                                for item in database["uploaded_files"]
+                                if str(item.get("openai_file_id", ""))
+                                != pending_file_id
+                            ]
+                            save_database(database)
+                            st.session_state.pop(
+                                "pending_delete_document",
+                                None,
+                            )
+                            st.success(
+                                f"Đã xóa tài liệu: {pending_file_name}"
+                            )
+                            st.rerun()
+                        except Exception as error:
+                            st.error(
+                                f"Không thể xóa {pending_file_name}: {error}"
+                            )
+
+                with cancel_col:
+                    if st.button(
+                        "Hủy",
+                        key="cancel_delete_document",
+                        use_container_width=True,
+                    ):
+                        st.session_state.pop(
+                            "pending_delete_document",
+                            None,
+                        )
+                        st.rerun()
 
     if st.button(
         "🔎 Kiểm tra kho tài liệu",
