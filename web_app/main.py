@@ -586,14 +586,24 @@ def upload_document(
     database: dict[str, Any],
     uploaded_file: Any,
 ) -> None:
+    """
+    Tải tài liệu lên OpenAI và giữ nguyên tên file gốc.
+
+    Trước đây NamedTemporaryFile tạo tên dạng tmpxxxx.doc, nên OpenAI lưu luôn
+    tên tạm đó. Bản này tạo một thư mục tạm nhưng tên file bên trong vẫn là
+    tên người dùng đã tải lên.
+    """
     vector_store_id = ensure_vector_store(client, database)
-    suffix = Path(uploaded_file.name).suffix
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-        temp_file.write(uploaded_file.getbuffer())
-        temp_path = Path(temp_file.name)
+    original_name = Path(uploaded_file.name).name
+    safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", original_name).strip()
+    if not safe_name:
+        safe_name = f"tai_lieu_{uuid.uuid4().hex[:8]}.bin"
 
-    try:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir) / safe_name
+        temp_path.write_bytes(uploaded_file.getbuffer())
+
         with temp_path.open("rb") as file_handle:
             openai_file = client.files.create(
                 file=file_handle,
@@ -605,16 +615,14 @@ def upload_document(
             file_id=openai_file.id,
         )
 
-        database["uploaded_files"].append(
-            {
-                "name": uploaded_file.name,
-                "openai_file_id": openai_file.id,
-                "uploaded_at": now_text(),
-            }
-        )
-        save_database(database)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    database["uploaded_files"].append(
+        {
+            "name": original_name,
+            "openai_file_id": openai_file.id,
+            "uploaded_at": now_text(),
+        }
+    )
+    save_database(database)
 
 
 def build_api_input(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -770,6 +778,17 @@ def should_read_full_document(question: str) -> bool:
         "phía sau",
         "trong bảng",
         "phụ lục",
+        "chức năng nhiệm vụ",
+        "chức năng, nhiệm vụ",
+        "cơ cấu tổ chức",
+        "các phòng",
+        "các đơn vị",
+        "theo quy định",
+        "theo tài liệu",
+        "theo văn bản",
+        "quy trình",
+        "gồm những",
+        "có những",
     ]
     return any(term in normalized for term in trigger_terms)
 
@@ -930,7 +949,17 @@ def stream_openai_answer(
         full_document_files: list[str] = []
         full_document_errors: list[str] = []
 
-        if candidates and should_read_full_document(latest_question):
+        if candidates:
+            # Câu hỏi tổng hợp, danh sách, chức danh, số lượng... đọc tối đa 2 file.
+            # Các câu hỏi còn lại vẫn đọc toàn văn file phù hợp nhất để tránh
+            # trường hợp chỉ lấy được vài đoạn rời rạc.
+            full_file_limit = (
+                2 if should_read_full_document(latest_question) else 1
+            )
+            full_char_limit = (
+                120_000 if full_file_limit == 2 else 80_000
+            )
+
             (
                 full_document_context,
                 full_document_files,
@@ -939,8 +968,8 @@ def stream_openai_answer(
                 get_api_key(),
                 vector_store_id,
                 candidates,
-                max_files=2,
-                max_total_chars=120_000,
+                max_files=full_file_limit,
+                max_total_chars=full_char_limit,
             )
 
         diagnostics["full_document_files"] = full_document_files
@@ -1231,6 +1260,16 @@ with st.sidebar:
                 "Đã bật, chờ câu hỏi",
             )
             st.caption(f"File Search trực tiếp: {native_status}")
+
+            if (
+                diagnostic.get("retrieved_context_chars", 0) > 0
+                and diagnostic.get("full_document_chars", 0) == 0
+                and not full_errors
+            ):
+                st.info(
+                    "Đã tìm được đoạn liên quan. Câu hỏi trước có thể chưa kích hoạt "
+                    "đọc toàn văn; bản cập nhật mới sẽ luôn đọc ít nhất file phù hợp nhất."
+                )
 
     st.divider()
     current_model = FAST_MODEL if fast_mode else DEEP_MODEL
