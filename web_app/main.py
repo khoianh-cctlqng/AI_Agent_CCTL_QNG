@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -13,6 +14,10 @@ from typing import Any
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt
+import xlsxwriter
 
 
 # =========================================================
@@ -40,7 +45,515 @@ Nguyên tắc trả lời:
 - Không tự tạo căn cứ pháp lý, số hiệu văn bản hoặc số liệu.
 - Khi chưa đủ dữ liệu, nêu rõ nội dung còn thiếu.
 - Với yêu cầu soạn thảo văn bản, trình bày chặt chẽ, rõ ý, đúng thể thức diễn đạt hành chính.
+- Tự lựa chọn hình thức trình bày phù hợp:
+  + Dùng bảng Markdown khi cần so sánh, tổng hợp danh sách, số liệu hoặc phân công.
+  + Khi người dùng yêu cầu xuất Excel, bắt buộc trình bày dữ liệu chính dưới dạng bảng Markdown có hàng tiêu đề rõ ràng.
+  + Dùng sơ đồ Mermaid khi cần mô tả quy trình, quan hệ, luồng xử lý, cây tổ chức hoặc tiến trình.
+  + Dùng khối biểu đồ khi có dữ liệu số phù hợp để trực quan hóa.
+- Chỉ tạo sơ đồ hoặc biểu đồ khi nội dung và dữ liệu thực sự hỗ trợ; không tự bịa số liệu.
+- Định dạng sơ đồ đúng mẫu:
+```mermaid
+flowchart TD
+    A[Bắt đầu] --> B[Xử lý]
+```
+- Định dạng biểu đồ đúng mẫu JSON:
+```chart
+{"type":"bar","title":"Tiêu đề","categories":["A","B"],"values":[10,20],"unit":"m3/s"}
+```
+  Các loại được hỗ trợ: bar, line, pie.
 """.strip()
+
+
+
+
+# =========================================================
+# XUẤT WORD VÀ EXCEL
+# =========================================================
+def clean_export_text(content: str) -> str:
+    """Loại bỏ các khối biểu đồ/sơ đồ không phù hợp khi xuất văn bản."""
+    cleaned = re.sub(
+        r"```(?:mermaid|chart)\s*\n.*?```",
+        "",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return cleaned.strip()
+
+
+def extract_markdown_tables(content: str) -> list[dict[str, Any]]:
+    """Tách các bảng Markdown hợp lệ trong câu trả lời."""
+    lines = content.splitlines()
+    tables: list[dict[str, Any]] = []
+    index = 0
+
+    def split_row(line: str) -> list[str]:
+        stripped = line.strip().strip("|")
+        return [cell.strip() for cell in stripped.split("|")]
+
+    def is_separator(line: str) -> bool:
+        cells = split_row(line)
+        return bool(cells) and all(
+            re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) is not None
+            for cell in cells
+        )
+
+    while index < len(lines) - 1:
+        if "|" in lines[index] and is_separator(lines[index + 1]):
+            headers = split_row(lines[index])
+            rows: list[list[str]] = []
+            index += 2
+
+            while index < len(lines) and "|" in lines[index]:
+                row = split_row(lines[index])
+                if len(row) == len(headers):
+                    rows.append(row)
+                index += 1
+
+            if headers:
+                tables.append(
+                    {
+                        "headers": headers,
+                        "rows": rows,
+                    }
+                )
+            continue
+
+        index += 1
+
+    return tables
+
+
+def add_markdown_to_docx(document: Document, content: str) -> None:
+    """Chuyển phần Markdown thường gặp thành nội dung Word."""
+    lines = clean_export_text(content).splitlines()
+    index = 0
+
+    while index < len(lines):
+        line = lines[index].rstrip()
+
+        # Bảng Markdown.
+        if (
+            index + 1 < len(lines)
+            and "|" in line
+            and re.search(r"\|?\s*:?-{3,}:?\s*\|", lines[index + 1])
+        ):
+            table_lines = [line, lines[index + 1]]
+            index += 2
+            while index < len(lines) and "|" in lines[index]:
+                table_lines.append(lines[index])
+                index += 1
+
+            tables = extract_markdown_tables("\n".join(table_lines))
+            if tables:
+                table_data = tables[0]
+                headers = table_data["headers"]
+                rows = table_data["rows"]
+                word_table = document.add_table(
+                    rows=1,
+                    cols=len(headers),
+                )
+                word_table.style = "Table Grid"
+
+                for column_index, header in enumerate(headers):
+                    word_table.rows[0].cells[column_index].text = header
+
+                for row in rows:
+                    cells = word_table.add_row().cells
+                    for column_index, value in enumerate(row):
+                        cells[column_index].text = value
+
+                document.add_paragraph()
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            document.add_paragraph()
+            index += 1
+            continue
+
+        heading_match = re.match(r"^(#{1,4})\s+(.+)$", stripped)
+        if heading_match:
+            level = min(len(heading_match.group(1)), 4)
+            document.add_heading(
+                heading_match.group(2),
+                level=level,
+            )
+            index += 1
+            continue
+
+        numbered_match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        bullet_match = re.match(r"^[-*•]\s+(.+)$", stripped)
+
+        if numbered_match:
+            paragraph = document.add_paragraph(
+                style="List Number",
+            )
+            paragraph.add_run(numbered_match.group(1))
+        elif bullet_match:
+            paragraph = document.add_paragraph(
+                style="List Bullet",
+            )
+            paragraph.add_run(bullet_match.group(1))
+        else:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(
+                re.sub(r"\*\*(.*?)\*\*", r"\1", stripped)
+            )
+
+        index += 1
+
+
+def build_word_bytes(content: str) -> bytes:
+    """Tạo file Word từ câu trả lời."""
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.75)
+    section.bottom_margin = Inches(0.75)
+    section.left_margin = Inches(0.9)
+    section.right_margin = Inches(0.75)
+
+    styles = document.styles
+    normal_style = styles["Normal"]
+    normal_style.font.name = "Times New Roman"
+    normal_style.font.size = Pt(13)
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("NỘI DUNG TRẢ LỜI CỦA TRỢ LÝ CCTL_QNG")
+    run.bold = True
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(14)
+
+    document.add_paragraph()
+    add_markdown_to_docx(document, content)
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def build_excel_bytes(content: str) -> bytes | None:
+    """Tạo Excel từ tất cả bảng Markdown trong câu trả lời."""
+    tables = extract_markdown_tables(content)
+    if not tables:
+        return None
+
+    buffer = io.BytesIO()
+    workbook = xlsxwriter.Workbook(
+        buffer,
+        {"in_memory": True},
+    )
+
+    header_format = workbook.add_format(
+        {
+            "bold": True,
+            "align": "center",
+            "valign": "vcenter",
+            "text_wrap": True,
+            "border": 1,
+            "bg_color": "#D9EAF7",
+        }
+    )
+    cell_format = workbook.add_format(
+        {
+            "valign": "top",
+            "text_wrap": True,
+            "border": 1,
+        }
+    )
+    title_format = workbook.add_format(
+        {
+            "bold": True,
+            "font_size": 14,
+            "align": "center",
+            "valign": "vcenter",
+        }
+    )
+
+    for table_index, table_data in enumerate(tables, start=1):
+        sheet_name = f"Bang_{table_index}"[:31]
+        worksheet = workbook.add_worksheet(sheet_name)
+        headers = table_data["headers"]
+        rows = table_data["rows"]
+
+        if headers:
+            worksheet.merge_range(
+                0,
+                0,
+                0,
+                max(len(headers) - 1, 0),
+                f"BẢNG {table_index}",
+                title_format,
+            )
+
+        for column_index, header in enumerate(headers):
+            worksheet.write(
+                2,
+                column_index,
+                header,
+                header_format,
+            )
+
+        for row_index, row in enumerate(rows, start=3):
+            for column_index, value in enumerate(row):
+                worksheet.write(
+                    row_index,
+                    column_index,
+                    value,
+                    cell_format,
+                )
+
+        worksheet.freeze_panes(3, 0)
+        worksheet.autofilter(
+            2,
+            0,
+            max(2, len(rows) + 2),
+            max(0, len(headers) - 1),
+        )
+
+        for column_index, header in enumerate(headers):
+            longest = len(str(header))
+            for row in rows[:200]:
+                if column_index < len(row):
+                    longest = max(
+                        longest,
+                        len(str(row[column_index])),
+                    )
+            worksheet.set_column(
+                column_index,
+                column_index,
+                min(max(longest + 2, 12), 40),
+            )
+
+    workbook.close()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def render_export_buttons(
+    content: str,
+    *,
+    key_prefix: str,
+) -> None:
+    """Hiển thị nút tải Word và Excel dưới mỗi câu trả lời."""
+    word_bytes = build_word_bytes(content)
+    excel_bytes = build_excel_bytes(content)
+
+    col_word, col_excel, col_note = st.columns([1.25, 1.25, 3.5])
+
+    with col_word:
+        st.download_button(
+            "📄 Tải Word",
+            data=word_bytes,
+            file_name=f"Tra_loi_CCTL_QNG_{datetime.now():%Y%m%d_%H%M%S}.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            key=f"{key_prefix}_word",
+            use_container_width=True,
+        )
+
+    with col_excel:
+        if excel_bytes:
+            st.download_button(
+                "📊 Tải Excel",
+                data=excel_bytes,
+                file_name=f"Bang_CCTL_QNG_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                key=f"{key_prefix}_excel",
+                use_container_width=True,
+            )
+        else:
+            st.button(
+                "📊 Chưa có bảng",
+                key=f"{key_prefix}_no_excel",
+                disabled=True,
+                use_container_width=True,
+            )
+
+    with col_note:
+        if not excel_bytes:
+            st.caption(
+                "Excel chỉ xuất khi câu trả lời có bảng Markdown."
+            )
+
+
+# =========================================================
+# HIỂN THỊ NỘI DUNG TRỰC QUAN
+# =========================================================
+def render_mermaid_diagram(code: str, *, height: int = 460) -> None:
+    """Hiển thị sơ đồ Mermaid trong một khung nhúng."""
+    diagram_json = json.dumps(code)
+    components.html(
+        f"""
+        <div class="mermaid-wrap">
+            <div id="diagram" class="mermaid"></div>
+        </div>
+        <script type="module">
+            import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+            mermaid.initialize({{
+                startOnLoad: false,
+                securityLevel: "loose",
+                theme: "neutral",
+                flowchart: {{ useMaxWidth: true, htmlLabels: true }}
+            }});
+            const source = {diagram_json};
+            const container = document.getElementById("diagram");
+            try {{
+                const result = await mermaid.render(
+                    "mermaid-" + Math.random().toString(36).slice(2),
+                    source
+                );
+                container.innerHTML = result.svg;
+            }} catch (error) {{
+                container.innerHTML =
+                    "<pre style='white-space:pre-wrap;color:#b91c1c'>" +
+                    "Không dựng được sơ đồ Mermaid: " +
+                    String(error) +
+                    "</pre>";
+            }}
+        </script>
+        <style>
+            body {{
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: transparent;
+            }}
+            .mermaid-wrap {{
+                border: 1px solid #e6e8eb;
+                border-radius: 14px;
+                padding: 14px;
+                background: #ffffff;
+                overflow: auto;
+            }}
+            .mermaid-wrap svg {{
+                max-width: 100%;
+                height: auto;
+            }}
+        </style>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
+
+def render_chart_block(raw_json: str) -> None:
+    """Hiển thị biểu đồ bar, line hoặc pie từ khối JSON do mô hình tạo."""
+    try:
+        chart = json.loads(raw_json)
+    except json.JSONDecodeError as error:
+        st.warning(f"Không đọc được dữ liệu biểu đồ: {error}")
+        st.code(raw_json, language="json")
+        return
+
+    chart_type = str(chart.get("type", "bar")).lower()
+    title = str(chart.get("title", "Biểu đồ"))
+    categories = list(chart.get("categories", []) or [])
+    values = list(chart.get("values", []) or [])
+    unit = str(chart.get("unit", "") or "")
+
+    if not categories or not values or len(categories) != len(values):
+        st.warning("Dữ liệu biểu đồ chưa hợp lệ.")
+        st.code(raw_json, language="json")
+        return
+
+    data = [
+        {"category": str(category), "value": value}
+        for category, value in zip(categories, values)
+    ]
+
+    if chart_type == "pie":
+        spec = {
+            "title": title,
+            "data": {"values": data},
+            "mark": {"type": "arc", "tooltip": True},
+            "encoding": {
+                "theta": {"field": "value", "type": "quantitative"},
+                "color": {"field": "category", "type": "nominal"},
+                "tooltip": [
+                    {"field": "category", "type": "nominal", "title": "Hạng mục"},
+                    {
+                        "field": "value",
+                        "type": "quantitative",
+                        "title": unit or "Giá trị",
+                    },
+                ],
+            },
+            "view": {"stroke": None},
+        }
+    else:
+        mark_type = "line" if chart_type == "line" else "bar"
+        spec = {
+            "title": title,
+            "data": {"values": data},
+            "mark": {"type": mark_type, "point": chart_type == "line", "tooltip": True},
+            "encoding": {
+                "x": {
+                    "field": "category",
+                    "type": "nominal",
+                    "title": None,
+                    "sort": None,
+                },
+                "y": {
+                    "field": "value",
+                    "type": "quantitative",
+                    "title": unit or "Giá trị",
+                },
+                "tooltip": [
+                    {"field": "category", "type": "nominal", "title": "Hạng mục"},
+                    {
+                        "field": "value",
+                        "type": "quantitative",
+                        "title": unit or "Giá trị",
+                    },
+                ],
+            },
+        }
+
+    st.vega_lite_chart(spec, use_container_width=True)
+
+
+def render_assistant_content(content: str) -> None:
+    """
+    Hiển thị nội dung trợ lý:
+    - Markdown và bảng Markdown;
+    - sơ đồ Mermaid;
+    - biểu đồ JSON;
+    - giữ nguyên các khối mã khác.
+    """
+    block_pattern = re.compile(
+        r"```(?P<language>mermaid|chart)\s*\n(?P<body>.*?)```",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    cursor = 0
+    found_visual = False
+
+    for match in block_pattern.finditer(content):
+        markdown_part = content[cursor:match.start()].strip()
+        if markdown_part:
+            st.markdown(markdown_part)
+
+        language = match.group("language").lower()
+        body = match.group("body").strip()
+
+        if language == "mermaid":
+            render_mermaid_diagram(body)
+        else:
+            render_chart_block(body)
+
+        found_visual = True
+        cursor = match.end()
+
+    remaining = content[cursor:].strip()
+    if remaining:
+        st.markdown(remaining)
+    elif not found_visual and content.strip():
+        st.markdown(content)
 
 
 # =========================================================
@@ -1426,10 +1939,19 @@ else:
     if hidden_count > 0:
         st.caption(f"Đã ẩn {hidden_count} tin nhắn cũ để tăng tốc hiển thị.")
 
-    for message in visible_messages:
+    for message_index, message in enumerate(visible_messages):
         avatar = "👨🏻" if message["role"] == "user" else "💧"
         with st.chat_message(message["role"], avatar=avatar):
-            st.markdown(message["content"])
+            if message["role"] == "assistant":
+                render_assistant_content(message["content"])
+                render_export_buttons(
+                    message["content"],
+                    key_prefix=(
+                        f"history_{conversation['id']}_{message_index}"
+                    ),
+                )
+            else:
+                st.markdown(message["content"])
 
 # Điều khiển vị trí cuộn:
 # - Có hội thoại: cuộn xuống tin nhắn mới nhất.
@@ -1569,7 +2091,11 @@ if chat_submission:
         )
 
         with st.chat_message("assistant", avatar="💧"):
-            st.markdown(answer)
+            render_assistant_content(answer)
+            render_export_buttons(
+                answer,
+                key_prefix=f"attached_{conversation_id}",
+            )
 
         append_message(
             database,
@@ -1631,7 +2157,14 @@ if question:
             if not answer:
                 answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
 
-            st.markdown(answer)
+            render_assistant_content(answer)
+            render_export_buttons(
+                answer,
+                key_prefix=(
+                    f"latest_{conversation_id}_"
+                    f"{len(current_messages)}"
+                ),
+            )
 
         except Exception as error:
             answer = (
