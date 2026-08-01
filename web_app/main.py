@@ -652,6 +652,7 @@ def search_vector_store_context(
     client: OpenAI,
     vector_store_id: str,
     question: str,
+    filename_map: dict[str, str] | None = None,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     """
     Tìm trực tiếp trong kho bằng nhiều cách diễn đạt.
@@ -691,7 +692,14 @@ def search_vector_store_context(
 
         for result in getattr(page, "data", []) or []:
             file_id = getattr(result, "file_id", "") or ""
-            filename = getattr(result, "filename", "") or "Tài liệu không rõ tên"
+            raw_filename = (
+                getattr(result, "filename", "")
+                or "Tài liệu không rõ tên"
+            )
+            filename = (
+                (filename_map or {}).get(file_id)
+                or raw_filename
+            )
             score = float(getattr(result, "score", 0.0) or 0.0)
 
             parts: list[str] = []
@@ -925,6 +933,14 @@ def stream_openai_answer(
 
         diagnostics["question"] = latest_question
 
+        original_filename_map = {
+            str(item.get("openai_file_id", "")).strip(): str(
+                item.get("name", "")
+            ).strip()
+            for item in database.get("uploaded_files", [])
+            if item.get("openai_file_id") and item.get("name")
+        }
+
         (
             retrieved_context,
             source_files,
@@ -933,6 +949,7 @@ def stream_openai_answer(
             client,
             vector_store_id,
             latest_question,
+            filename_map=original_filename_map,
         )
 
         diagnostics["manual_search_files"] = source_files
@@ -1016,7 +1033,8 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Đọc kỹ cả bảng, danh sách, dòng liền trước và liền sau.
 - Ghép đúng họ tên với chức danh và mốc thời gian tương ứng.
 - Không tự suy đoán ngoài tài liệu.
-- Cuối câu trả lời ghi: "Tài liệu đã tra: {source_text}".
+- Cuối câu trả lời ghi chính xác: "Tài liệu đã tra: {source_text}".
+- Chỉ dùng đúng tên tài liệu trong dòng trên; không tự thay bằng tên tạm kiểu tmp... hoặc tên do hệ thống suy đoán.
 - Nếu có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
 """
         else:
