@@ -1510,49 +1510,126 @@ else:
 # =========================================================
 # Ô NHẬP DƯỚI CÙNG VÀ XỬ LÝ CÂU HỎI
 # =========================================================
-question = st.chat_input("Hỏi Trợ lý CCTL_QNG...")
+# Ô chat native của Streamlit:
+# - Nút dấu cộng để đính kèm một hoặc nhiều tài liệu;
+# - Shift + Enter để xuống dòng;
+# - Enter để gửi.
+chat_submission = st.chat_input(
+    "Hỏi Trợ lý CCTL_QNG...",
+    key="main_chat_input",
+    accept_file="multiple",
+    file_type=["pdf", "docx", "doc", "txt", "md", "csv", "xlsx"],
+    max_upload_size=200,
+)
 
-if question:
-    question = question.strip()
+question = ""
+chat_files: list[Any] = []
 
-    if question:
+if chat_submission:
+    # Khi accept_file được bật, st.chat_input trả về đối tượng có
+    # thuộc tính text và files.
+    question = str(getattr(chat_submission, "text", "") or "").strip()
+    chat_files = list(getattr(chat_submission, "files", []) or [])
+
+    # Đưa ngay các file đính kèm ở khung chat vào Vector Store.
+    upload_messages: list[str] = []
+    if chat_files:
+        try:
+            client = get_client()
+
+            for attached_file in chat_files:
+                upload_document(client, database, attached_file)
+                upload_messages.append(attached_file.name)
+
+        except Exception as error:
+            st.error(f"Không thể đưa file đính kèm vào kho: {error}")
+            st.stop()
+
+    # Cho phép chỉ đính kèm file mà không cần nhập câu hỏi.
+    if not question and upload_messages:
         conversation_id = conversation["id"]
-        append_message(database, conversation_id, "user", question)
+        attached_text = (
+            "Đã đính kèm tài liệu: "
+            + ", ".join(upload_messages)
+        )
+        append_message(
+            database,
+            conversation_id,
+            "user",
+            attached_text,
+        )
 
         with st.chat_message("user", avatar="👤"):
-            st.markdown(question)
+            st.markdown(attached_text)
+
+        answer = (
+            "Tôi đã đưa tài liệu vào kho dùng chung. "
+            "Anh/chị có thể đặt câu hỏi về nội dung tài liệu ngay bây giờ."
+        )
 
         with st.chat_message("assistant", avatar="💧"):
-            try:
-                client = get_client()
-                current_messages = database["conversations"][conversation_id]["messages"]
+            st.markdown(answer)
 
-                # Tự động tra kho nếu câu hỏi nhắc đến tài liệu, kể cả khi
-                # người dùng vô tình đang để chế độ Nhanh.
-                auto_document_search = bool(database.get("uploaded_files")) and question_requests_documents(question)
-                effective_file_search = use_file_search or auto_document_search
-                effective_fast_mode = fast_mode and not effective_file_search
-
-                answer = st.write_stream(
-                    stream_openai_answer(
-                        client,
-                        database,
-                        current_messages,
-                        use_file_search=effective_file_search,
-                        fast_mode=effective_fast_mode,
-                    )
-                )
-
-                if not answer:
-                    answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
-                    st.markdown(answer)
-
-            except Exception as error:
-                answer = (
-                    "Không thể kết nối hoặc xử lý yêu cầu với OpenAI. "
-                    f"Chi tiết lỗi: `{error}`"
-                )
-                st.error(answer)
-
-        append_message(database, conversation_id, "assistant", answer)
+        append_message(
+            database,
+            conversation_id,
+            "assistant",
+            answer,
+        )
         st.rerun()
+
+if question:
+    conversation_id = conversation["id"]
+
+    # Ghi kèm tên file trong tin nhắn để lịch sử trò chuyện rõ ràng.
+    displayed_question = question
+    if chat_files:
+        displayed_question += (
+            "\n\n📎 **Tệp đính kèm:** "
+            + ", ".join(file.name for file in chat_files)
+        )
+
+    append_message(database, conversation_id, "user", displayed_question)
+
+    with st.chat_message("user", avatar="👤"):
+        st.markdown(displayed_question)
+
+    with st.chat_message("assistant", avatar="💧"):
+        try:
+            client = get_client()
+            current_messages = database["conversations"][conversation_id]["messages"]
+
+            # Có file vừa đính kèm thì luôn bật tra cứu kho cho câu hỏi này.
+            auto_document_search = (
+                bool(chat_files)
+                or (
+                    bool(database.get("uploaded_files"))
+                    and question_requests_documents(question)
+                )
+            )
+            effective_file_search = use_file_search or auto_document_search
+            effective_fast_mode = fast_mode and not effective_file_search
+
+            answer = st.write_stream(
+                stream_openai_answer(
+                    client,
+                    database,
+                    current_messages,
+                    use_file_search=effective_file_search,
+                    fast_mode=effective_fast_mode,
+                )
+            )
+
+            if not answer:
+                answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
+                st.markdown(answer)
+
+        except Exception as error:
+            answer = (
+                "Không thể kết nối hoặc xử lý yêu cầu với OpenAI. "
+                f"Chi tiết lỗi: `{error}`"
+            )
+            st.error(answer)
+
+    append_message(database, conversation_id, "assistant", answer)
+    st.rerun()
