@@ -14,10 +14,25 @@ from typing import Any
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
-from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
-import xlsxwriter
+
+try:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Inches, Pt
+    DOCX_AVAILABLE = True
+except ImportError:
+    Document = Any
+    WD_ALIGN_PARAGRAPH = None
+    Inches = None
+    Pt = None
+    DOCX_AVAILABLE = False
+
+try:
+    import xlsxwriter
+    XLSX_AVAILABLE = True
+except ImportError:
+    xlsxwriter = None
+    XLSX_AVAILABLE = False
 
 
 # =========================================================
@@ -203,8 +218,11 @@ def add_markdown_to_docx(document: Document, content: str) -> None:
         index += 1
 
 
-def build_word_bytes(content: str) -> bytes:
+def build_word_bytes(content: str) -> bytes | None:
     """Tạo file Word từ câu trả lời."""
+    if not DOCX_AVAILABLE:
+        return None
+
     document = Document()
     section = document.sections[0]
     section.top_margin = Inches(0.75)
@@ -234,6 +252,9 @@ def build_word_bytes(content: str) -> bytes:
 
 def build_excel_bytes(content: str) -> bytes | None:
     """Tạo Excel từ tất cả bảng Markdown trong câu trả lời."""
+    if not XLSX_AVAILABLE:
+        return None
+
     tables = extract_markdown_tables(content)
     if not tables:
         return None
@@ -342,17 +363,25 @@ def render_export_buttons(
     col_word, col_excel, col_note = st.columns([1.25, 1.25, 3.5])
 
     with col_word:
-        st.download_button(
-            "📄 Tải Word",
-            data=word_bytes,
-            file_name=f"Tra_loi_CCTL_QNG_{datetime.now():%Y%m%d_%H%M%S}.docx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            key=f"{key_prefix}_word",
-            use_container_width=True,
-        )
+        if word_bytes:
+            st.download_button(
+                "📄 Tải Word",
+                data=word_bytes,
+                file_name=f"Tra_loi_CCTL_QNG_{datetime.now():%Y%m%d_%H%M%S}.docx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                ),
+                key=f"{key_prefix}_word",
+                use_container_width=True,
+            )
+        else:
+            st.button(
+                "📄 Chưa sẵn sàng",
+                key=f"{key_prefix}_no_word",
+                disabled=True,
+                use_container_width=True,
+            )
 
     with col_excel:
         if excel_bytes:
@@ -376,10 +405,12 @@ def render_export_buttons(
             )
 
     with col_note:
-        if not excel_bytes:
-            st.caption(
-                "Excel chỉ xuất khi câu trả lời có bảng Markdown."
-            )
+        if not DOCX_AVAILABLE:
+            st.caption("Chưa cài python-docx nên tạm thời chưa xuất Word.")
+        elif not XLSX_AVAILABLE:
+            st.caption("Chưa cài XlsxWriter nên tạm thời chưa xuất Excel.")
+        elif not excel_bytes:
+            st.caption("Excel chỉ xuất khi câu trả lời có bảng Markdown.")
 
 
 # =========================================================
@@ -1601,6 +1632,23 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
             diagnostics["native_file_search_status"] = "Lỗi"
 
         st.session_state["rag_diagnostics"] = diagnostics
+
+
+# =========================================================
+# KIỂM TRA THƯ VIỆN XUẤT FILE
+# =========================================================
+if not DOCX_AVAILABLE or not XLSX_AVAILABLE:
+    missing_packages = []
+    if not DOCX_AVAILABLE:
+        missing_packages.append("python-docx")
+    if not XLSX_AVAILABLE:
+        missing_packages.append("XlsxWriter")
+
+    st.warning(
+        "Ứng dụng vẫn hoạt động, nhưng chức năng xuất file đang chờ cài: "
+        + ", ".join(missing_packages)
+        + "."
+    )
 
 
 # =========================================================
