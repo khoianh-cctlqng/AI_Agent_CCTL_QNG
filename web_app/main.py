@@ -812,19 +812,21 @@ def build_full_document_context(
     *,
     max_files: int = 2,
     max_total_chars: int = 120_000,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """
     Đọc toàn bộ nội dung đã phân tích của tối đa vài file phù hợp nhất.
-    Có giới hạn ký tự để tránh đầu vào quá lớn và chi phí không cần thiết.
+    Trả thêm danh sách lỗi để có thể chẩn đoán thay vì bỏ qua âm thầm.
     """
     blocks: list[str] = []
     filenames: list[str] = []
+    errors: list[str] = []
     total_chars = 0
 
     for candidate in candidates[:max_files]:
         file_id = candidate.get("file_id", "")
         filename = candidate.get("filename", "Tài liệu không rõ tên")
         if not file_id:
+            errors.append(f"{filename}: không có file_id.")
             continue
 
         try:
@@ -833,10 +835,14 @@ def build_full_document_context(
                 vector_store_id,
                 file_id,
             )
-        except Exception:
+        except Exception as error:
+            errors.append(f"{filename}: {error}")
             continue
 
         if not full_text.strip():
+            errors.append(
+                f"{filename}: OpenAI không trả về phần chữ đã phân tích."
+            )
             continue
 
         remaining = max_total_chars - total_chars
@@ -845,12 +851,12 @@ def build_full_document_context(
 
         clipped = full_text[:remaining]
         blocks.append(
-            f"[TOÀN VĂN ĐÃ PHÂN TÍCH | Tài liệu: {filename}]\n{clipped}"
+            f"[TOÀN VĂN ĐÃ PHÂN TÍCH | Tài liệu: {filename}]\\n{clipped}"
         )
         filenames.append(filename)
         total_chars += len(clipped)
 
-    return "\n\n".join(blocks), filenames
+    return "\\n\\n".join(blocks), filenames, errors
 
 
 def stream_openai_answer(
@@ -865,6 +871,20 @@ def stream_openai_answer(
 
     api_input = build_api_input(messages)
     instructions = SYSTEM_INSTRUCTIONS
+    vector_store_id = ""
+    diagnostics: dict[str, Any] = {
+        "enabled": use_file_search,
+        "model": model,
+        "vector_store_id": "",
+        "question": "",
+        "manual_search_files": [],
+        "candidate_files": [],
+        "retrieved_context_chars": 0,
+        "full_document_files": [],
+        "full_document_chars": 0,
+        "full_document_errors": [],
+        "native_file_search_enabled": False,
+    }
 
     if use_file_search:
         vector_store_id = (
@@ -876,11 +896,15 @@ def stream_openai_answer(
                 "Chưa xác định được OPENAI_VECTOR_STORE_ID cho kho tài liệu."
             )
 
+        diagnostics["vector_store_id"] = vector_store_id
+
         latest_question = ""
         for message in reversed(messages):
             if message.get("role") == "user":
                 latest_question = str(message.get("content", "")).strip()
                 break
+
+        diagnostics["question"] = latest_question
 
         (
             retrieved_context,
@@ -892,13 +916,26 @@ def stream_openai_answer(
             latest_question,
         )
 
+        diagnostics["manual_search_files"] = source_files
+        diagnostics["candidate_files"] = [
+            {
+                "filename": item.get("filename", ""),
+                "score": round(float(item.get("score", 0.0) or 0.0), 3),
+            }
+            for item in candidates
+        ]
+        diagnostics["retrieved_context_chars"] = len(retrieved_context)
+
         full_document_context = ""
         full_document_files: list[str] = []
+        full_document_errors: list[str] = []
 
-        # Với câu hỏi dạng danh sách, nhân sự, chức danh, số lượng...
-        # đọc thêm toàn bộ 2 file phù hợp nhất để hạn chế bỏ sót bảng và phần cuối.
         if candidates and should_read_full_document(latest_question):
-            full_document_context, full_document_files = build_full_document_context(
+            (
+                full_document_context,
+                full_document_files,
+                full_document_errors,
+            ) = build_full_document_context(
                 get_api_key(),
                 vector_store_id,
                 candidates,
@@ -906,17 +943,21 @@ def stream_openai_answer(
                 max_total_chars=120_000,
             )
 
+        diagnostics["full_document_files"] = full_document_files
+        diagnostics["full_document_chars"] = len(full_document_context)
+        diagnostics["full_document_errors"] = full_document_errors
+
         combined_context_parts: list[str] = []
         if retrieved_context:
             combined_context_parts.append(
-                "CÁC ĐOẠN TÌM KIẾM LIÊN QUAN:\n" + retrieved_context
+                "CÁC ĐOẠN TÌM KIẾM LIÊN QUAN:\\n" + retrieved_context
             )
         if full_document_context:
             combined_context_parts.append(
-                "NỘI DUNG TOÀN FILE DỰ PHÒNG:\n" + full_document_context
+                "NỘI DUNG TOÀN FILE DỰ PHÒNG:\\n" + full_document_context
             )
 
-        combined_context = "\n\n".join(combined_context_parts).strip()
+        combined_context = "\\n\\n".join(combined_context_parts).strip()
 
         if combined_context:
             api_input.append(
@@ -924,9 +965,9 @@ def stream_openai_answer(
                     "role": "user",
                     "content": (
                         "Dưới đây là kết quả tra cứu từ kho tài liệu. "
-                        "Một số file phù hợp nhất đã được đọc toàn bộ phần nội dung "
-                        "mà OpenAI phân tích. Hãy kiểm tra kỹ bảng, danh sách, phần cuối "
-                        "tài liệu, họ tên, chức danh, ngày tháng và các dòng liền kề.\n\n"
+                        "Hãy ưu tiên dùng nội dung này để trả lời câu hỏi trước đó. "
+                        "Kiểm tra kỹ bảng, danh sách, phần cuối tài liệu, họ tên, "
+                        "chức danh, ngày tháng và các dòng liền kề.\\n\\n"
                         f"{combined_context}"
                     ),
                 }
@@ -941,10 +982,10 @@ def stream_openai_answer(
             instructions += f"""
 
 YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
-- Ưu tiên nội dung toàn file dự phòng nếu có.
+- Ưu tiên nội dung tra cứu đã được cung cấp.
+- Nếu nội dung cung cấp chưa đủ, bắt buộc dùng công cụ file_search để tra tiếp trong kho.
 - Đọc kỹ cả bảng, danh sách, dòng liền trước và liền sau.
 - Ghép đúng họ tên với chức danh và mốc thời gian tương ứng.
-- Không được nói chưa tìm thấy nếu thông tin đã xuất hiện trong nội dung cung cấp.
 - Không tự suy đoán ngoài tài liệu.
 - Cuối câu trả lời ghi: "Tài liệu đã tra: {source_text}".
 - Nếu có mâu thuẫn, nêu rõ từng phương án và tài liệu tương ứng.
@@ -952,9 +993,10 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
         else:
             instructions += """
 
-YÊU CẦU TRẢ LỜI:
-- Chưa lấy được nội dung phù hợp từ kho.
-- Nêu rõ khả năng file scan, file .doc cũ hoặc bảng phức tạp chưa được trích xuất chữ đầy đủ.
+YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
+- Kết quả tìm kiếm thủ công chưa lấy được đoạn phù hợp.
+- Bắt buộc sử dụng công cụ file_search để tìm trực tiếp trong Vector Store trước khi trả lời.
+- Chỉ kết luận theo nội dung tìm được; không tự suy đoán.
 """
 
     request: dict[str, Any] = {
@@ -967,11 +1009,36 @@ YÊU CẦU TRẢ LỜI:
         "max_output_tokens": 900 if fast_mode else 3000,
     }
 
+    if use_file_search and vector_store_id:
+        request["tools"] = [
+            {
+                "type": "file_search",
+                "vector_store_ids": [vector_store_id],
+                "max_num_results": 20,
+            }
+        ]
+        diagnostics["native_file_search_enabled"] = True
+
+    st.session_state["rag_diagnostics"] = diagnostics
+
     stream = client.responses.create(**request)
 
     for event in stream:
-        if event.type == "response.output_text.delta":
+        event_type = getattr(event, "type", "")
+
+        if event_type == "response.output_text.delta":
             yield event.delta
+
+        elif event_type == "response.file_search_call.searching":
+            diagnostics["native_file_search_status"] = "Đang tìm kiếm"
+
+        elif event_type == "response.file_search_call.completed":
+            diagnostics["native_file_search_status"] = "Hoàn tất"
+
+        elif event_type == "response.file_search_call.failed":
+            diagnostics["native_file_search_status"] = "Lỗi"
+
+        st.session_state["rag_diagnostics"] = diagnostics
 
 
 # =========================================================
@@ -1126,6 +1193,44 @@ with st.sidebar:
             st.caption(f"Vector Store ID: {vector_store_id}")
         except Exception as error:
             st.error(f"Không kiểm tra được kho tài liệu: {error}")
+
+    if use_file_search and st.session_state.get("rag_diagnostics"):
+        diagnostic = st.session_state["rag_diagnostics"]
+        with st.expander("🧪 Chẩn đoán tra cứu tài liệu", expanded=False):
+            st.caption(
+                f"Vector Store: {diagnostic.get('vector_store_id') or 'Chưa xác định'}"
+            )
+            st.caption(
+                "File tìm thấy: "
+                f"{len(diagnostic.get('manual_search_files', []))}; "
+                "Ký tự từ tìm kiếm: "
+                f"{diagnostic.get('retrieved_context_chars', 0):,}; "
+                "Ký tự toàn file: "
+                f"{diagnostic.get('full_document_chars', 0):,}."
+            )
+
+            candidate_files = diagnostic.get("candidate_files", [])
+            if candidate_files:
+                st.markdown("**File ứng viên:**")
+                for item in candidate_files[:8]:
+                    st.caption(
+                        f"• {item.get('filename', 'Không rõ tên')} "
+                        f"— điểm {item.get('score', 0)}"
+                    )
+            else:
+                st.warning("Tìm kiếm thủ công chưa trả về file ứng viên.")
+
+            full_errors = diagnostic.get("full_document_errors", [])
+            if full_errors:
+                st.markdown("**Lỗi khi đọc toàn file:**")
+                for error_text in full_errors[:5]:
+                    st.error(error_text)
+
+            native_status = diagnostic.get(
+                "native_file_search_status",
+                "Đã bật, chờ câu hỏi",
+            )
+            st.caption(f"File Search trực tiếp: {native_status}")
 
     st.divider()
     current_model = FAST_MODEL if fast_mode else DEEP_MODEL
