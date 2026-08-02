@@ -1471,6 +1471,55 @@ def build_full_document_context(
     return "\\n\\n".join(blocks), filenames, errors
 
 
+
+SENSITIVE_FIELD_PATTERNS: dict[str, list[str]] = {
+    "CCCD": [r"\bcccd\b", r"\bcăn cước\b", r"\bcmnd\b"],
+    "Số sổ BHXH": [r"\bbhxh\b", r"\bsổ bảo hiểm xã hội\b"],
+    "Số thẻ BHYT": [r"\bbhyt\b", r"\bthẻ bảo hiểm y tế\b"],
+    "Số điện thoại": [r"\bsố điện thoại\b", r"\bđiện thoại\b", r"\bsđt\b"],
+    "Số tài khoản": [r"\bsố tài khoản\b", r"\btài khoản ngân hàng\b"],
+}
+
+
+def detect_sensitive_field(question: str) -> str:
+    normalized = question.lower()
+    for field_name, patterns in SENSITIVE_FIELD_PATTERNS.items():
+        if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns):
+            return field_name
+    return ""
+
+
+def has_explicit_labeled_value(context: str, field_name: str) -> bool:
+    if not context or not field_name:
+        return False
+
+    label_patterns = {
+        "CCCD": [r"(?:CCCD|CMND|Căn cước)\s*[:\-]?\s*(\d{9,12})"],
+        "Số sổ BHXH": [r"(?:Số\s*sổ\s*BHXH|BHXH)\s*[:\-]?\s*(\d{8,15})"],
+        "Số thẻ BHYT": [r"(?:Số\s*thẻ\s*BHYT|BHYT)\s*[:\-]?\s*([A-Z0-9]{8,20})"],
+        "Số điện thoại": [r"(?:Số\s*điện\s*thoại|Điện\s*thoại|SĐT)\s*[:\-]?\s*(0\d{8,10})"],
+        "Số tài khoản": [r"(?:Số\s*tài\s*khoản|Tài\s*khoản)\s*[:\-]?\s*(\d{6,20})"],
+    }
+
+    return any(
+        re.search(pattern, context, flags=re.IGNORECASE)
+        for pattern in label_patterns.get(field_name, [])
+    )
+
+
+def build_sensitive_field_warning(field_name: str, source_files: list[str]) -> str:
+    source_lines = "\n".join(f"- {name}" for name in source_files) or "- Chưa xác định"
+    return (
+        f"Chưa thể xác nhận chính xác **{field_name}** từ tài liệu đã tra cứu. "
+        "Bảng trong PDF có dấu hiệu bị tách hàng/cột khi trích xuất, nên việc "
+        "gán một chuỗi số vào đúng cột có nguy cơ sai lệch.\n\n"
+        "**Khuyến cáo kiểm tra:** Cần đối chiếu trực tiếp hàng của người được hỏi "
+        f"với tiêu đề cột **{field_name}** trong file gốc trước khi sử dụng chính thức.\n\n"
+        "**Nguồn văn bản trong kho:**\n"
+        f"{source_lines}"
+    )
+
+
 def stream_openai_answer(
     client: OpenAI,
     database: dict[str, Any],
@@ -1557,10 +1606,12 @@ def stream_openai_answer(
         full_document_files: list[str] = []
         full_document_errors: list[str] = []
 
-        if candidates and deep_mode:
-            # Chỉ chế độ Chuyên sâu mới đọc toàn văn để giảm thời gian chờ.
+        sensitive_field = detect_sensitive_field(latest_question)
+
+        if candidates and (deep_mode or sensitive_field):
+            # Với trường dữ liệu nhạy cảm, luôn đọc toàn văn ít nhất 1 file.
             full_file_limit = (
-                2 if should_read_full_document(latest_question) else 1
+                2 if deep_mode and should_read_full_document(latest_question) else 1
             )
             full_char_limit = (
                 120_000 if full_file_limit == 2 else 80_000
@@ -1594,6 +1645,23 @@ def stream_openai_answer(
 
         combined_context = "\\n\\n".join(combined_context_parts).strip()
 
+        # Không cho phép suy đoán dữ liệu nhạy cảm từ bảng PDF bị dàn phẳng.
+        if sensitive_field and not has_explicit_labeled_value(
+            combined_context,
+            sensitive_field,
+        ):
+            all_sources: list[str] = []
+            for name in source_files + full_document_files:
+                if name and name not in all_sources:
+                    all_sources.append(name)
+
+            st.session_state["rag_diagnostics"] = diagnostics
+            yield build_sensitive_field_warning(
+                sensitive_field,
+                all_sources,
+            )
+            return
+
         if combined_context:
             api_input.append(
                 {
@@ -1622,6 +1690,8 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Không suy đoán ngoài dữ liệu đã cung cấp.
 - Nếu chưa đủ căn cứ, nêu đúng một câu ngắn về phần còn thiếu.
 - Với dữ liệu bảng, phải kiểm tra đúng tiêu đề cột và đúng hàng của đối tượng trước khi trả lời.
+- Tuyệt đối không suy giá trị CCCD, BHXH, BHYT, số điện thoại hoặc số tài khoản từ vị trí tương đối của các chuỗi số trong bảng PDF đã bị dàn phẳng.
+- Nếu nhãn cột không nằm sát giá trị trong đoạn trích, phải từ chối xác nhận thay vì chọn một số gần đó.
 - Với CCCD/CMND, số điện thoại, BHXH, BHYT hoặc chuỗi số dài: nếu không thấy rõ tiêu đề cột thì không được khẳng định chắc chắn.
 - Nếu có khả năng nhầm cột, phải thêm mục:
 
