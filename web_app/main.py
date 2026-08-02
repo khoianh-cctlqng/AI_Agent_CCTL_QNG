@@ -47,6 +47,7 @@ DATA_FILE = DATA_DIR / "conversations.json"
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 FAST_MODEL = os.getenv("OPENAI_FAST_MODEL", "gpt-5-nano")
+SEARCH_MODEL = os.getenv("OPENAI_SEARCH_MODEL", "gpt-5-mini")
 DEEP_MODEL = os.getenv("OPENAI_DEEP_MODEL", DEFAULT_MODEL)
 DEFAULT_VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID", "").strip()
 
@@ -1477,8 +1478,14 @@ def stream_openai_answer(
     *,
     use_file_search: bool,
     fast_mode: bool,
+    deep_mode: bool = False,
 ):
-    model = FAST_MODEL if fast_mode else DEEP_MODEL
+    if deep_mode:
+        model = DEEP_MODEL
+    elif fast_mode:
+        model = FAST_MODEL
+    else:
+        model = SEARCH_MODEL
 
     api_input = build_api_input(messages)
     instructions = SYSTEM_INSTRUCTIONS
@@ -1550,10 +1557,8 @@ def stream_openai_answer(
         full_document_files: list[str] = []
         full_document_errors: list[str] = []
 
-        if candidates:
-            # Câu hỏi tổng hợp, danh sách, chức danh, số lượng... đọc tối đa 2 file.
-            # Các câu hỏi còn lại vẫn đọc toàn văn file phù hợp nhất để tránh
-            # trường hợp chỉ lấy được vài đoạn rời rạc.
+        if candidates and deep_mode:
+            # Chỉ chế độ Chuyên sâu mới đọc toàn văn để giảm thời gian chờ.
             full_file_limit = (
                 2 if should_read_full_document(latest_question) else 1
             )
@@ -1639,14 +1644,27 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Chỉ kết luận theo nội dung tìm được; không tự suy đoán.
 """
 
+    if deep_mode:
+        reasoning_effort = "medium"
+        verbosity = "medium"
+        max_output_tokens = 2800
+    elif fast_mode:
+        reasoning_effort = "minimal"
+        verbosity = "low"
+        max_output_tokens = 700
+    else:
+        reasoning_effort = "minimal"
+        verbosity = "low"
+        max_output_tokens = 1100
+
     request: dict[str, Any] = {
         "model": model,
         "instructions": instructions,
         "input": api_input,
         "stream": True,
-        "reasoning": {"effort": "minimal" if fast_mode else "medium"},
-        "text": {"verbosity": "low" if fast_mode else "medium"},
-        "max_output_tokens": 1000 if fast_mode else 2800,
+        "reasoning": {"effort": reasoning_effort},
+        "text": {"verbosity": verbosity},
+        "max_output_tokens": max_output_tokens,
     }
 
     if use_file_search and vector_store_id:
@@ -1654,7 +1672,9 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
             {
                 "type": "file_search",
                 "vector_store_ids": [vector_store_id],
-                "max_num_results": 20,
+                "max_num_results": (
+                    20 if deep_mode else (5 if fast_mode else 8)
+                ),
             }
         ]
         diagnostics["native_file_search_enabled"] = True
@@ -1777,22 +1797,32 @@ with st.sidebar:
 
     answer_mode = st.radio(
         "Chọn chế độ",
-        options=["⚡ Nhanh", "📚 Chuyên sâu"],
+        options=["⚡ Nhanh", "🔎 Tra cứu nhanh", "📚 Chuyên sâu"],
         index=1,
         label_visibility="collapsed",
         help=(
-            "Chế độ Nhanh dùng model gọn và không tra kho tài liệu. "
-            "Chế độ Chuyên sâu dùng model tốt hơn và tự tra tài liệu đã nạp."
+            "Nhanh: trả lời hằng ngày bằng model gọn. "
+            "Tra cứu nhanh: tìm trong kho nhưng không đọc toàn văn. "
+            "Chuyên sâu: đọc kỹ hơn, có thể đọc toàn văn tài liệu."
         ),
     )
 
     fast_mode = answer_mode == "⚡ Nhanh"
-    use_file_search = answer_mode == "📚 Chuyên sâu"
+    deep_mode = answer_mode == "📚 Chuyên sâu"
+    use_file_search = answer_mode in {"🔎 Tra cứu nhanh", "📚 Chuyên sâu"}
 
     if fast_mode:
-        st.caption("Phù hợp câu hỏi hằng ngày. Câu hỏi có cụm 'theo tài liệu' vẫn tự động tra kho.")
+        st.caption(
+            "Tốc độ cao nhất. Chỉ tự tra kho khi câu hỏi có dấu hiệu cần tài liệu."
+        )
+    elif deep_mode:
+        st.caption(
+            "Đọc kỹ, có thể đọc toàn văn 1–2 tài liệu; phù hợp câu hỏi khó hoặc cần độ chắc chắn cao."
+        )
     else:
-        st.caption("Đang bật tra cứu kho tài liệu cho mọi câu hỏi.")
+        st.caption(
+            "Tra cứu kho nhanh, lấy các đoạn liên quan nhưng không đọc toàn văn."
+        )
 
     st.divider()
     st.markdown("##### Tài liệu dùng chung")
@@ -2000,7 +2030,12 @@ with st.sidebar:
                 )
 
     st.divider()
-    current_model = FAST_MODEL if fast_mode else DEEP_MODEL
+    if deep_mode:
+        current_model = DEEP_MODEL
+    elif fast_mode:
+        current_model = FAST_MODEL
+    else:
+        current_model = SEARCH_MODEL
     st.caption(f"Model đang dùng: {current_model}")
 
 
@@ -2230,12 +2265,20 @@ if question:
                 )
             )
             effective_file_search = use_file_search or auto_document_search
-            effective_fast_mode = fast_mode and not effective_file_search
+            effective_fast_mode = fast_mode
+            effective_deep_mode = deep_mode
 
             # Thu toàn bộ nội dung trước rồi mới hiển thị một lần.
             # Cách này tránh hiện tượng chữ/bullet bị ngắt quãng khi mạng chậm
             # hoặc từng delta Markdown được Streamlit vẽ chưa trọn vẹn.
-            with st.spinner("Đang tổng hợp câu trả lời..."):
+            spinner_text = (
+                "Đang phân tích chuyên sâu..."
+                if effective_deep_mode
+                else "Đang tra cứu nhanh..."
+                if effective_file_search
+                else "Đang trả lời..."
+            )
+            with st.spinner(spinner_text):
                 answer_parts: list[str] = []
                 for text_delta in stream_openai_answer(
                     client,
@@ -2243,6 +2286,7 @@ if question:
                     current_messages,
                     use_file_search=effective_file_search,
                     fast_mode=effective_fast_mode,
+                    deep_mode=effective_deep_mode,
                 ):
                     if text_delta:
                         answer_parts.append(str(text_delta))
