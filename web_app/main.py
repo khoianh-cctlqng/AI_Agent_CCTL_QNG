@@ -63,6 +63,12 @@ NGUYÊN TẮC TRẢ LỜI:
 - Không lặp lại cùng một ý ở nhiều đoạn.
 - Không đưa ra các đề nghị hỗ trợ thêm ở cuối câu trả lời, trừ khi người dùng yêu cầu.
 - Chỉ nêu cảnh báo hoặc mức độ không chắc chắn khi thực sự cần thiết.
+- Với dữ liệu lấy từ bảng, biểu mẫu hoặc danh sách nhiều cột, phải kiểm tra đúng tiêu đề cột trước khi kết luận.
+- Đặc biệt thận trọng với CCCD/CMND, số điện thoại, mã số BHXH, số thẻ BHYT, ngày sinh, số tài khoản và các chuỗi số dài.
+- Không được suy ra loại dữ liệu chỉ dựa vào độ dài chuỗi số.
+- Nếu đoạn trích bị mất hàng/cột, bị tách bảng, thiếu tiêu đề cột hoặc không đủ ngữ cảnh để ghép đúng người với đúng giá trị, không được khẳng định chắc chắn.
+- Khi có khả năng nhầm cột hoặc nhầm dòng, phải nêu cảnh báo ngắn ngay sau câu trả lời.
+- Chỉ xác nhận số định danh cá nhân khi đồng thời xác định được: đúng người, đúng cột dữ liệu và đúng dòng tương ứng.
 
 ĐỘ DÀI MẶC ĐỊNH:
 - Câu hỏi hỏi một thông tin cụ thể: trả lời trong 1–3 câu.
@@ -89,6 +95,11 @@ TRẢ LỜI TỪ KHO TÀI LIỆU:
 - Nếu xác định được trang, điều, khoản hoặc bảng thì ghi sau tên tài liệu.
 - Không dùng tên file tạm kiểu tmp... nếu đã có tên file gốc.
 - Không lặp lại tên nguồn ở phần nội dung chính.
+- Nếu dữ liệu có rủi ro nhầm cột, thêm ngay trước mục nguồn một đoạn ngắn theo mẫu:
+
+**Khuyến cáo kiểm tra:** Kết quả trên được đọc từ bảng/đoạn trích có thể bị tách cột hoặc thiếu tiêu đề; cần đối chiếu trực tiếp file gốc trước khi sử dụng chính thức.
+
+- Không dùng cảnh báo này khi dữ liệu đã được xác định chắc chắn từ đúng cột, đúng dòng và đủ ngữ cảnh.
 
 ĐỊNH DẠNG:
 - Dùng bảng Markdown khi người dùng yêu cầu bảng, so sánh hoặc xuất Excel.
@@ -1361,6 +1372,15 @@ def should_read_full_document(question: str) -> bool:
         "quy trình",
         "gồm những",
         "có những",
+        "cccd",
+        "cmnd",
+        "căn cước",
+        "số điện thoại",
+        "bhxh",
+        "bhyt",
+        "ngày sinh",
+        "mã số",
+        "số tài khoản",
     ]
     return any(term in normalized for term in trigger_terms)
 
@@ -1596,6 +1616,12 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Không chép dài nội dung tài liệu nếu người dùng không yêu cầu trích nguyên văn.
 - Không suy đoán ngoài dữ liệu đã cung cấp.
 - Nếu chưa đủ căn cứ, nêu đúng một câu ngắn về phần còn thiếu.
+- Với dữ liệu bảng, phải kiểm tra đúng tiêu đề cột và đúng hàng của đối tượng trước khi trả lời.
+- Với CCCD/CMND, số điện thoại, BHXH, BHYT hoặc chuỗi số dài: nếu không thấy rõ tiêu đề cột thì không được khẳng định chắc chắn.
+- Nếu có khả năng nhầm cột, phải thêm mục:
+
+**Khuyến cáo kiểm tra:** Có khả năng dữ liệu bị lệch hoặc tách cột trong quá trình trích xuất; cần đối chiếu trực tiếp file gốc trước khi sử dụng chính thức.
+
 - Cuối câu trả lời ghi đúng mục:
 
 **Nguồn văn bản trong kho:**
@@ -1620,7 +1646,7 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
         "stream": True,
         "reasoning": {"effort": "minimal" if fast_mode else "medium"},
         "text": {"verbosity": "low" if fast_mode else "medium"},
-        "max_output_tokens": 900 if fast_mode else 2600,
+        "max_output_tokens": 1000 if fast_mode else 2800,
     }
 
     if use_file_search and vector_store_id:
