@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import httpx
 import uuid
 from datetime import datetime
@@ -14,6 +15,13 @@ from typing import Any
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
+
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None
+    PANDAS_AVAILABLE = False
 
 try:
     from docx import Document
@@ -44,6 +52,7 @@ APP_ICON = "💧"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_FILE = DATA_DIR / "conversations.json"
+TABLE_DATA_DIR = DATA_DIR / "table_data"
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 FAST_MODEL = os.getenv("OPENAI_FAST_MODEL", "gpt-5-nano")
@@ -1002,6 +1011,7 @@ def new_database() -> dict[str, Any]:
         "active_id": None,
         "vector_store_id": DEFAULT_VECTOR_STORE_ID,
         "uploaded_files": [],
+        "table_files": [],
         "conversations": {},
     }
 
@@ -1032,6 +1042,7 @@ def load_database() -> dict[str, Any]:
     database.setdefault("active_id", None)
     database.setdefault("vector_store_id", DEFAULT_VECTOR_STORE_ID)
     database.setdefault("uploaded_files", [])
+    database.setdefault("table_files", [])
     database.setdefault("conversations", {})
 
     configured_vector_store_id = get_configured_vector_store_id()
@@ -1091,6 +1102,273 @@ def append_message(
         conversation["title"] = shorten_title(content)
 
     save_database(database)
+
+
+
+# =========================================================
+# KHO BẢNG DỮ LIỆU CÓ CẤU TRÚC
+# =========================================================
+TABLE_COLUMN_ALIASES: dict[str, list[str]] = {
+    "Họ và tên": ["ho va ten", "ho ten", "họ và tên", "họ tên", "ho_ten"],
+    "Ngày sinh": ["ngay sinh", "ngày sinh", "ngay thang nam sinh"],
+    "Chức vụ": ["chuc vu", "chức vụ", "chuc danh", "chức danh"],
+    "Quê quán": ["que quan", "quê quán"],
+    "Trình độ chuyên môn": ["trinh do chuyen mon", "trình độ chuyên môn"],
+    "Trình độ LLCT": ["trinh do llct", "trình độ llct", "ly luan chinh tri"],
+    "Ngày vào Đảng": ["ngay vao dang", "ngày vào đảng"],
+    "CCCD": ["cccd", "cmnd", "can cuoc", "căn cước"],
+    "Ngày cấp CCCD": ["ngay cap", "ngày cấp", "ngay thang nam cap"],
+    "Số sổ BHXH": ["so so bhxh", "số sổ bhxh", "bhxh"],
+    "Số thẻ BHYT": ["so the bhyt", "số thẻ bhyt", "bhyt"],
+    "Số điện thoại": ["dien thoai", "điện thoại", "so dien thoai", "sdt"],
+}
+
+
+def normalize_table_text(value: Any) -> str:
+    value_text = "" if value is None else str(value)
+    value_text = unicodedata.normalize("NFD", value_text)
+    value_text = "".join(
+        char for char in value_text
+        if unicodedata.category(char) != "Mn"
+    )
+    value_text = value_text.lower().strip()
+    value_text = re.sub(r"[^a-z0-9]+", " ", value_text)
+    return " ".join(value_text.split())
+
+
+def canonical_column_name(column_name: Any) -> str:
+    normalized = normalize_table_text(column_name)
+    for canonical, aliases in TABLE_COLUMN_ALIASES.items():
+        alias_set = {
+            normalize_table_text(item)
+            for item in aliases + [canonical]
+        }
+        if normalized in alias_set:
+            return canonical
+    return str(column_name).strip()
+
+
+def clean_table_dataframe(dataframe: Any) -> Any:
+    dataframe = dataframe.copy()
+    dataframe = dataframe.dropna(how="all").dropna(axis=1, how="all")
+    dataframe.columns = [
+        canonical_column_name(column)
+        for column in dataframe.columns
+    ]
+
+    seen: dict[str, int] = {}
+    unique_columns: list[str] = []
+    for column in dataframe.columns:
+        count = seen.get(column, 0)
+        seen[column] = count + 1
+        unique_columns.append(
+            column if count == 0 else f"{column}_{count + 1}"
+        )
+    dataframe.columns = unique_columns
+
+    for column in dataframe.columns:
+        dataframe[column] = (
+            dataframe[column]
+            .fillna("")
+            .astype(str)
+            .map(str.strip)
+        )
+    return dataframe
+
+
+def read_table_file(file_path: Path) -> dict[str, Any]:
+    if not PANDAS_AVAILABLE:
+        raise RuntimeError("Chưa cài pandas/openpyxl.")
+
+    if file_path.suffix.lower() == ".csv":
+        last_error: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1258", "latin1"):
+            try:
+                dataframe = pd.read_csv(
+                    file_path,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding=encoding,
+                )
+                return {"CSV": clean_table_dataframe(dataframe)}
+            except Exception as error:
+                last_error = error
+        raise RuntimeError(f"Không đọc được CSV: {last_error}")
+
+    if file_path.suffix.lower() == ".xlsx":
+        sheets = pd.read_excel(
+            file_path,
+            sheet_name=None,
+            dtype=str,
+            keep_default_na=False,
+            engine="openpyxl",
+        )
+        return {
+            str(name): clean_table_dataframe(frame)
+            for name, frame in sheets.items()
+        }
+
+    raise RuntimeError("Chỉ nhận file .xlsx hoặc .csv.")
+
+
+def save_table_file(
+    database: dict[str, Any],
+    uploaded_file: Any,
+) -> dict[str, Any]:
+    original_name = Path(uploaded_file.name).name
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".xlsx", ".csv"}:
+        raise RuntimeError("Chỉ nhận file Excel .xlsx hoặc CSV.")
+
+    TABLE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = (
+        f"{uuid.uuid4().hex[:10]}_"
+        + re.sub(r'[<>:"/\\\\|?*]+', "_", original_name)
+    )
+    stored_path = TABLE_DATA_DIR / stored_name
+    stored_path.write_bytes(uploaded_file.getbuffer())
+
+    sheets = read_table_file(stored_path)
+    metadata = {
+        "id": uuid.uuid4().hex,
+        "name": original_name,
+        "stored_name": stored_name,
+        "uploaded_at": now_text(),
+        "sheet_names": list(sheets.keys()),
+    }
+    database.setdefault("table_files", []).append(metadata)
+    save_database(database)
+    return metadata
+
+
+def resolve_table_path(file_info: dict[str, Any]) -> Path:
+    return TABLE_DATA_DIR / str(file_info.get("stored_name", ""))
+
+
+def delete_table_file(database: dict[str, Any], table_file_id: str) -> None:
+    target = next(
+        (
+            item for item in database.get("table_files", [])
+            if str(item.get("id", "")) == table_file_id
+        ),
+        None,
+    )
+    if target:
+        resolve_table_path(target).unlink(missing_ok=True)
+
+    database["table_files"] = [
+        item for item in database.get("table_files", [])
+        if str(item.get("id", "")) != table_file_id
+    ]
+    save_database(database)
+
+
+def detect_requested_table_field(question: str) -> str:
+    normalized = normalize_table_text(question)
+    mapping = {
+        "CCCD": ["cccd", "cmnd", "can cuoc"],
+        "Số sổ BHXH": ["bhxh", "so so bhxh"],
+        "Số thẻ BHYT": ["bhyt", "so the bhyt"],
+        "Số điện thoại": ["so dien thoai", "dien thoai", "sdt"],
+        "Ngày sinh": ["ngay sinh", "sinh ngay"],
+        "Chức vụ": ["chuc vu", "chuc danh"],
+        "Quê quán": ["que quan"],
+        "Trình độ chuyên môn": ["trinh do chuyen mon"],
+        "Trình độ LLCT": ["trinh do llct", "ly luan chinh tri"],
+        "Ngày vào Đảng": ["ngay vao dang"],
+    }
+    for field, terms in mapping.items():
+        if any(term in normalized for term in terms):
+            return field
+    return ""
+
+
+def lookup_structured_table(
+    database: dict[str, Any],
+    question: str,
+) -> str | None:
+    requested_field = detect_requested_table_field(question)
+    if not requested_field or not database.get("table_files"):
+        return None
+
+    normalized_question = normalize_table_text(question)
+    matches: list[dict[str, Any]] = []
+
+    for file_info in database.get("table_files", []):
+        file_path = resolve_table_path(file_info)
+        if not file_path.exists():
+            continue
+
+        try:
+            sheets = read_table_file(file_path)
+        except Exception:
+            continue
+
+        for sheet_name, dataframe in sheets.items():
+            if (
+                "Họ và tên" not in dataframe.columns
+                or requested_field not in dataframe.columns
+            ):
+                continue
+
+            for row_index, raw_name in dataframe["Họ và tên"].items():
+                normalized_name = normalize_table_text(raw_name)
+                if not normalized_name or normalized_name not in normalized_question:
+                    continue
+
+                value = str(
+                    dataframe.at[row_index, requested_field]
+                ).strip()
+                if not value:
+                    continue
+
+                matches.append(
+                    {
+                        "file": str(file_info.get("name", file_path.name)),
+                        "sheet": sheet_name,
+                        "row": int(row_index) + 2,
+                        "person": str(raw_name).strip(),
+                        "field": requested_field,
+                        "value": value,
+                    }
+                )
+
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in matches:
+        key = (
+            item["file"],
+            item["sheet"],
+            item["person"],
+            item["value"],
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    if not unique:
+        return None
+
+    if len(unique) > 1:
+        options = "\n".join(
+            f"- {item['person']} — `{item['file']}`, "
+            f"sheet `{item['sheet']}`, hàng {item['row']}"
+            for item in unique[:8]
+        )
+        return (
+            "Tìm thấy nhiều bản ghi phù hợp nên chưa thể tự chọn.\n\n"
+            f"{options}\n\n"
+            "**Khuyến cáo kiểm tra:** Bổ sung ngày sinh hoặc đơn vị để "
+            "xác định đúng người."
+        )
+
+    item = unique[0]
+    return (
+        f"**{item['field']} của {item['person']}:** {item['value']}\n\n"
+        "**Nguồn bảng dữ liệu:**\n"
+        f"- `{item['file']}` — sheet `{item['sheet']}`, "
+        f"hàng {item['row']}, cột `{item['field']}`."
+    )
 
 
 # =========================================================
@@ -1645,16 +1923,38 @@ def stream_openai_answer(
 
         combined_context = "\\n\\n".join(combined_context_parts).strip()
 
-        # Không cho phép suy đoán dữ liệu nhạy cảm từ bảng PDF bị dàn phẳng.
+        # Cơ chế khóa an toàn tuyệt đối cho dữ liệu nhạy cảm lấy từ PDF.
+        # File Search thường làm phẳng bảng PDF nên có thể ghép sai cột dù tiêu đề
+        # xuất hiện trong tài liệu. Vì vậy không cho phép trả số nhạy cảm từ PDF.
+        all_sources: list[str] = []
+        for name in source_files + full_document_files:
+            if name and name not in all_sources:
+                all_sources.append(name)
+
+        has_pdf_source = any(
+            str(name).lower().endswith(".pdf")
+            for name in all_sources
+        )
+
+        if sensitive_field and has_pdf_source:
+            st.session_state["rag_diagnostics"] = diagnostics
+            yield (
+                f"Chưa thể xác nhận chính xác **{sensitive_field}** từ file PDF này. "
+                "Bảng PDF có thể bị làm phẳng khi trích xuất, dẫn đến ghép nhầm cột "
+                "như CCCD, BHXH hoặc số điện thoại.\n\n"
+                "**Khuyến cáo kiểm tra:** Không sử dụng số do Agent suy ra từ bảng PDF "
+                "cho công việc chính thức. Hãy đối chiếu trực tiếp file gốc hoặc tải lên "
+                "bản Excel/CSV có cấu trúc cột rõ ràng.\n\n"
+                "**Nguồn văn bản trong kho:**\n"
+                + ("\n".join(f"- {name}" for name in all_sources) or "- Chưa xác định")
+            )
+            return
+
+        # Với nguồn không phải PDF, vẫn yêu cầu nhãn và giá trị nằm gần nhau.
         if sensitive_field and not has_explicit_labeled_value(
             combined_context,
             sensitive_field,
         ):
-            all_sources: list[str] = []
-            for name in source_files + full_document_files:
-                if name and name not in all_sources:
-                    all_sources.append(name)
-
             st.session_state["rag_diagnostics"] = diagnostics
             yield build_sensitive_field_warning(
                 sensitive_field,
@@ -1692,6 +1992,7 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Với dữ liệu bảng, phải kiểm tra đúng tiêu đề cột và đúng hàng của đối tượng trước khi trả lời.
 - Tuyệt đối không suy giá trị CCCD, BHXH, BHYT, số điện thoại hoặc số tài khoản từ vị trí tương đối của các chuỗi số trong bảng PDF đã bị dàn phẳng.
 - Nếu nhãn cột không nằm sát giá trị trong đoạn trích, phải từ chối xác nhận thay vì chọn một số gần đó.
+- Với nguồn PDF dạng bảng, không được trả CCCD/CMND, BHXH, BHYT, số điện thoại hoặc số tài khoản; chỉ được hướng dẫn đối chiếu file gốc hoặc dùng Excel/CSV.
 - Với CCCD/CMND, số điện thoại, BHXH, BHYT hoặc chuỗi số dài: nếu không thấy rõ tiêu đề cột thì không được khẳng định chắc chắn.
 - Nếu có khả năng nhầm cột, phải thêm mục:
 
@@ -1905,7 +2206,7 @@ with st.sidebar:
 
     uploaded_files = st.file_uploader(
         "Tải tài liệu",
-        type=["pdf", "docx", "doc", "txt", "md", "csv", "xlsx"],
+        type=["pdf", "docx", "doc", "txt", "md"],
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
@@ -2032,6 +2333,118 @@ with st.sidebar:
                             "pending_delete_document",
                             None,
                         )
+                        st.rerun()
+
+
+    st.divider()
+    st.markdown("##### Kho bảng dữ liệu")
+
+    if not PANDAS_AVAILABLE:
+        st.warning("Chưa cài pandas/openpyxl nên chưa dùng được kho bảng.")
+    else:
+        table_uploads = st.file_uploader(
+            "Tải Excel hoặc CSV",
+            type=["xlsx", "csv"],
+            accept_multiple_files=True,
+            key="structured_table_uploader",
+            label_visibility="collapsed",
+        )
+
+        if table_uploads and st.button(
+            "Đưa bảng dữ liệu vào hệ thống",
+            key="save_structured_tables",
+            use_container_width=True,
+        ):
+            try:
+                for table_upload in table_uploads:
+                    save_table_file(database, table_upload)
+                st.success("Đã nạp bảng dữ liệu.")
+                st.rerun()
+            except Exception as error:
+                st.error(f"Không thể nạp bảng: {error}")
+
+        table_files = database.get("table_files", [])
+        if table_files:
+            with st.expander(
+                f"🧮 {len(table_files)} bảng dữ liệu đã nạp",
+                expanded=False,
+            ):
+                selected_id = st.selectbox(
+                    "Chọn bảng",
+                    options=[str(item.get("id", "")) for item in table_files],
+                    format_func=lambda value: next(
+                        (
+                            str(item.get("name", "Bảng dữ liệu"))
+                            for item in table_files
+                            if str(item.get("id", "")) == value
+                        ),
+                        "Bảng dữ liệu",
+                    ),
+                    key="selected_structured_table",
+                )
+                selected_info = next(
+                    (
+                        item for item in table_files
+                        if str(item.get("id", "")) == selected_id
+                    ),
+                    None,
+                )
+
+                if selected_info:
+                    selected_path = resolve_table_path(selected_info)
+                    if selected_path.exists():
+                        sheets = read_table_file(selected_path)
+                        selected_sheet = st.selectbox(
+                            "Sheet",
+                            options=list(sheets.keys()),
+                            key="selected_table_sheet",
+                        )
+                        dataframe = sheets[selected_sheet]
+
+                        filter_column = st.selectbox(
+                            "Lọc theo cột",
+                            options=["— Không lọc —"] + list(dataframe.columns),
+                            key="table_filter_column",
+                        )
+                        filter_text = st.text_input(
+                            "Từ khóa lọc",
+                            key="table_filter_text",
+                            placeholder="Nhập họ tên, chức vụ, địa phương...",
+                        )
+
+                        filtered = dataframe
+                        if (
+                            filter_column != "— Không lọc —"
+                            and filter_text.strip()
+                        ):
+                            filtered = dataframe[
+                                dataframe[filter_column]
+                                .fillna("")
+                                .astype(str)
+                                .str.contains(
+                                    filter_text.strip(),
+                                    case=False,
+                                    regex=False,
+                                )
+                            ]
+
+                        st.caption(
+                            f"Hiển thị {len(filtered)} / {len(dataframe)} dòng"
+                        )
+                        st.dataframe(
+                            filtered.head(200),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.warning("File bảng đã mất sau khi máy chủ khởi động lại.")
+
+                    if st.button(
+                        "🗑️ Xóa bảng dữ liệu",
+                        key=f"delete_table_{selected_id}",
+                        use_container_width=True,
+                    ):
+                        delete_table_file(database, selected_id)
                         st.rerun()
 
     if st.button(
@@ -2267,7 +2680,11 @@ if chat_submission:
             client = get_client()
 
             for attached_file in chat_files:
-                upload_document(client, database, attached_file)
+                suffix = Path(attached_file.name).suffix.lower()
+                if suffix in {".xlsx", ".csv"}:
+                    save_table_file(database, attached_file)
+                else:
+                    upload_document(client, database, attached_file)
                 upload_messages.append(attached_file.name)
 
         except Exception as error:
@@ -2314,7 +2731,6 @@ if chat_submission:
 if question:
     conversation_id = conversation["id"]
 
-    # Ghi kèm tên file trong tin nhắn để lịch sử trò chuyện rõ ràng.
     displayed_question = question
     if chat_files:
         displayed_question += (
@@ -2327,66 +2743,81 @@ if question:
     with st.chat_message("user", avatar="👤"):
         st.markdown(displayed_question)
 
-    with st.chat_message("assistant", avatar="💧"):
-        try:
-            client = get_client()
-            current_messages = database["conversations"][conversation_id]["messages"]
+    structured_table_answer = lookup_structured_table(
+        database,
+        question,
+    )
 
-            # Có file vừa đính kèm thì luôn bật tra cứu kho cho câu hỏi này.
-            auto_document_search = (
-                bool(chat_files)
-                or (
-                    bool(database.get("uploaded_files"))
-                    and question_requests_documents(question)
-                )
-            )
-            effective_file_search = use_file_search or auto_document_search
-            effective_fast_mode = fast_mode
-            effective_deep_mode = deep_mode
-
-            # Thu toàn bộ nội dung trước rồi mới hiển thị một lần.
-            # Cách này tránh hiện tượng chữ/bullet bị ngắt quãng khi mạng chậm
-            # hoặc từng delta Markdown được Streamlit vẽ chưa trọn vẹn.
-            spinner_text = (
-                "Đang phân tích chuyên sâu..."
-                if effective_deep_mode
-                else "Đang tra cứu nhanh..."
-                if effective_file_search
-                else "Đang trả lời..."
-            )
-            with st.spinner(spinner_text):
-                answer_parts: list[str] = []
-                for text_delta in stream_openai_answer(
-                    client,
-                    database,
-                    current_messages,
-                    use_file_search=effective_file_search,
-                    fast_mode=effective_fast_mode,
-                    deep_mode=effective_deep_mode,
-                ):
-                    if text_delta:
-                        answer_parts.append(str(text_delta))
-
-                answer = "".join(answer_parts).strip()
-
-            if not answer:
-                answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
-
+    if structured_table_answer:
+        answer = structured_table_answer
+        with st.chat_message("assistant", avatar="💧"):
             render_assistant_content(answer)
             render_export_buttons(
                 answer,
                 key_prefix=(
-                    f"latest_{conversation_id}_"
-                    f"{len(current_messages)}"
+                    f"table_{conversation_id}_"
+                    f"{len(conversation.get('messages', []))}"
                 ),
             )
+    else:
+        with st.chat_message("assistant", avatar="💧"):
+            try:
+                client = get_client()
+                current_messages = database["conversations"][conversation_id]["messages"]
 
-        except Exception as error:
-            answer = (
-                "Không thể kết nối hoặc xử lý yêu cầu với OpenAI. "
-                f"Chi tiết lỗi: `{error}`"
-            )
-            st.error(answer)
+                auto_document_search = (
+                    bool(chat_files)
+                    or (
+                        bool(database.get("uploaded_files"))
+                        and question_requests_documents(question)
+                    )
+                )
+                effective_file_search = use_file_search or auto_document_search
+                effective_fast_mode = fast_mode
+                effective_deep_mode = deep_mode
+
+                spinner_text = (
+                    "Đang phân tích chuyên sâu..."
+                    if effective_deep_mode
+                    else "Đang tra cứu nhanh..."
+                    if effective_file_search
+                    else "Đang trả lời..."
+                )
+
+                with st.spinner(spinner_text):
+                    answer_parts: list[str] = []
+                    for text_delta in stream_openai_answer(
+                        client,
+                        database,
+                        current_messages,
+                        use_file_search=effective_file_search,
+                        fast_mode=effective_fast_mode,
+                        deep_mode=effective_deep_mode,
+                    ):
+                        if text_delta:
+                            answer_parts.append(str(text_delta))
+
+                    answer = "".join(answer_parts).strip()
+
+                if not answer:
+                    answer = "Tôi chưa tạo được câu trả lời. Anh vui lòng thử lại."
+
+                render_assistant_content(answer)
+                render_export_buttons(
+                    answer,
+                    key_prefix=(
+                        f"latest_{conversation_id}_"
+                        f"{len(current_messages)}"
+                    ),
+                )
+
+            except Exception as error:
+                answer = (
+                    "Không thể kết nối hoặc xử lý yêu cầu với OpenAI. "
+                    f"Chi tiết lỗi: `{error}`"
+                )
+                st.error(answer)
 
     append_message(database, conversation_id, "assistant", answer)
     st.rerun()
+
