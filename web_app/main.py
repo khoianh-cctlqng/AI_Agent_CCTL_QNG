@@ -1648,12 +1648,18 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
         reasoning_effort = "medium"
         verbosity = "medium"
         max_output_tokens = 2800
+    elif use_file_search:
+        # File Search không tương thích với reasoning.effort="minimal"
+        # trên một số model, nên dùng "low" để vừa nhanh vừa ổn định.
+        reasoning_effort = "low"
+        verbosity = "low"
+        max_output_tokens = 1100
     elif fast_mode:
         reasoning_effort = "minimal"
         verbosity = "low"
         max_output_tokens = 700
     else:
-        reasoning_effort = "minimal"
+        reasoning_effort = "low"
         verbosity = "low"
         max_output_tokens = 1100
 
