@@ -1203,149 +1203,109 @@ def canonical_column_name(column_name: Any) -> str:
 
 
 def clean_table_dataframe(dataframe: Any) -> Any:
-    """Chuẩn hóa bảng CSV/Excel, kể cả bảng có tiêu đề nhiều tầng và ô gộp."""
-    dataframe = dataframe.copy()
-
-    # Chuẩn hóa ô trước khi dò tiêu đề; giữ nguyên số 0 ở đầu mã/số điện thoại.
-    dataframe = dataframe.fillna("")
+    """Chuẩn hóa CSV/Excel có tiêu đề nhiều tầng, ô gộp và dòng phân nhóm."""
+    dataframe = dataframe.copy().fillna("")
     for column in dataframe.columns:
         dataframe[column] = dataframe[column].astype(str).map(str.strip)
 
     # Bỏ hàng/cột hoàn toàn trống.
     dataframe = dataframe.loc[
-        ~dataframe.apply(
-            lambda row: all(not str(value).strip() for value in row),
-            axis=1,
-        )
+        ~dataframe.apply(lambda row: all(not str(v).strip() for v in row), axis=1)
     ]
     dataframe = dataframe.loc[
-        :,
-        ~dataframe.apply(
-            lambda column: all(not str(value).strip() for value in column),
-            axis=0,
-        ),
+        :, ~dataframe.apply(lambda col: all(not str(v).strip() for v in col), axis=0)
     ]
-
     if dataframe.empty:
         return dataframe.reset_index(drop=True)
 
-    # CSV hoặc bảng đã có tên cột hợp lệ: chỉ chuẩn hóa tên cột như trước.
     existing_columns = [canonical_column_name(column) for column in dataframe.columns]
-    existing_canonical = set(existing_columns)
-    if "Họ và tên" in existing_canonical or "Tên công trình" in existing_canonical:
+    if {"Họ và tên", "Tên công trình"}.intersection(existing_columns):
         dataframe.columns = existing_columns
     else:
-        # Excel được đọc với header=None. Tìm hàng tiêu đề chính trong 20 hàng đầu.
-        header_terms = {
-            "ho va ten",
-            "chuc vu",
-            "que quan",
-            "trinh do chuyen mon",
-            "trinh do llct",
-            "ngay vao dang",
-            "cccd",
-            "so so bhxh",
-            "dien thoai",
-            "ten cong trinh",
-            "dia diem",
-            "loai cong trinh",
-            "nam ht",
-            "wtb",
-            "f tuoi",
-            "tram bom",
-            "kenh",
-            "ke",
-            "de",
+        # Tìm dòng tiêu đề chi tiết (leaf header), không lấy dòng tiêu đề nhóm.
+        leaf_terms = {
+            "ho va ten", "chuc vu", "que quan", "cccd", "so so bhxh",
+            "ten cong trinh", "ten ho chua", "ten ho", "dia diem", "stt", "tt",
+            "nam ht", "f lv", "flv", "f tuoi", "w toan bo", "wtoan bo", "wtb",
+            "mndbt", "mnltk", "cao trinh dinh dap", "hmax", "chieu dai dap", "l m",
+            "cao trinh nguong tran", "kich thuoc tran", "hinh thuc tran",
+            "kich thuoc cống", "kich thuoc cong", "don vi truc tiep quan ly",
         }
         header_index: int | None = None
-        best_score = 0
-
-        for position in range(min(len(dataframe), 20)):
-            values = [
-                normalize_table_text(value)
-                for value in dataframe.iloc[position].tolist()
-            ]
-            score = sum(
-                1
-                for term in header_terms
-                if any(term == value or term in value for value in values)
-            )
+        best_score = -1
+        scan_limit = min(len(dataframe), 30)
+        for position in range(scan_limit):
+            values = [normalize_table_text(v) for v in dataframe.iloc[position].tolist()]
+            score = 0
+            for value in values:
+                if not value:
+                    continue
+                if value in leaf_terms:
+                    score += 3
+                elif any(term in value or value in term for term in leaf_terms if len(term) >= 4):
+                    score += 1
+            # Ưu tiên dòng có nhiều ô tiêu đề khác nhau.
+            score += min(len({v for v in values if v}), 12) // 4
             if score > best_score:
                 best_score = score
                 header_index = position
 
-        if header_index is None or best_score < 2:
-            # Không nhận diện chắc chắn được tiêu đề thì không đoán cấu trúc bảng.
+        if header_index is None or best_score < 4:
             dataframe.columns = existing_columns
         else:
-            parent_headers = [
-                str(value).strip()
-                for value in dataframe.iloc[header_index].tolist()
-            ]
+            # Lấy các tầng tiêu đề thực sự ngay phía trên dòng tiêu đề chi tiết.
+            # Bỏ dòng tên bảng/phụ lục vì đó không phải tên nhóm cột.
+            header_rows: list[list[str]] = []
+            for pos in range(max(0, header_index - 3), header_index):
+                row = [str(v).strip() for v in dataframe.iloc[pos].tolist()]
+                non_empty = [normalize_table_text(v) for v in row if str(v).strip()]
+                joined_row = " ".join(non_empty)
+                is_table_title = any(term in joined_row for term in (
+                    "bang tong hop", "phu luc", "kem theo", "bao cao so",
+                    "thong so ky thuat cua cac", "phan loai ho chua",
+                ))
+                if len(non_empty) >= 2 and not is_table_title:
+                    header_rows.append(row)
+            header_rows.append([
+                str(v).strip() for v in dataframe.iloc[header_index].tolist()
+            ])
+            header_rows = header_rows[-3:]
 
-            # Ô gộp theo chiều ngang tạo các ô trống; điền tên nhóm sang phải.
-            last_parent = ""
-            for index, value in enumerate(parent_headers):
-                if value:
-                    last_parent = value
-                elif last_parent:
-                    parent_headers[index] = last_parent
-
-            child_headers = [""] * len(parent_headers)
-            data_start_index = header_index + 1
-
-            if header_index + 1 < len(dataframe):
-                candidate_children = [
-                    str(value).strip()
-                    for value in dataframe.iloc[header_index + 1].tolist()
-                ]
-                child_tokens = {
-                    normalize_table_text(value)
-                    for value in candidate_children
-                    if str(value).strip()
-                }
-                # Bảng nhiều tầng: ngoài Nam/Nữ còn có TK/TT, thông số đập...
-                generic_child_tokens = {
-                    "nam", "nu", "tk", "tt", "hmax", "cao trinh",
-                    "tcs", "don vi", "km", "ha", "m", "m3",
-                }
-                non_empty_children = [token for token in child_tokens if token]
-                if child_tokens.intersection(generic_child_tokens) or len(non_empty_children) >= 2:
-                    child_headers = candidate_children
-                    data_start_index = header_index + 2
+            # Điền ngang ô gộp cho từng tầng.
+            filled_rows: list[list[str]] = []
+            for row in header_rows:
+                filled = row[:]
+                last = ""
+                for idx, value in enumerate(filled):
+                    if value:
+                        last = value
+                    elif last:
+                        filled[idx] = last
+                filled_rows.append(filled)
 
             normalized_columns: list[str] = []
-            for index, parent in enumerate(parent_headers):
-                child = child_headers[index] if index < len(child_headers) else ""
-                parent = str(parent).strip()
-                child = str(child).strip()
+            width = len(dataframe.columns)
+            for col_index in range(width):
+                parts: list[str] = []
+                for row in filled_rows:
+                    value = row[col_index] if col_index < len(row) else ""
+                    norm = normalize_table_text(value)
+                    if not value or norm in {"bang 1", "bang 2", "bang 3", "thong so ky thuat"}:
+                        continue
+                    if parts and normalize_table_text(parts[-1]) == norm:
+                        continue
+                    parts.append(value)
 
-                if child and normalize_table_text(child) not in {
-                    normalize_table_text(parent),
-                    "stt",
-                }:
-                    column_name = f"{parent} - {child}" if parent else child
-                else:
-                    column_name = parent or child or f"Cột {index + 1}"
-
+                column_name = " - ".join(parts) if parts else f"Cột {col_index + 1}"
                 normalized = normalize_table_text(column_name)
 
-                # Chuẩn hóa chính xác các trường nhạy cảm, không suy đoán theo vị trí cột.
                 if "ho va ten" in normalized or normalized == "ho ten":
                     canonical = "Họ và tên"
                 elif normalized == "cccd" or normalized == "cmnd" or "can cuoc" in normalized:
                     canonical = "CCCD"
-                elif (
-                    "so so bhxh" in normalized
-                    or normalized == "bhxh"
-                    or "bao hiem xa hoi" in normalized
-                ):
+                elif "so so bhxh" in normalized or normalized == "bhxh" or "bao hiem xa hoi" in normalized:
                     canonical = "Số sổ BHXH"
-                elif (
-                    "so the bhyt" in normalized
-                    or normalized == "bhyt"
-                    or "bao hiem y te" in normalized
-                ):
+                elif "so the bhyt" in normalized or normalized == "bhyt" or "bao hiem y te" in normalized:
                     canonical = "Số thẻ BHYT"
                 elif "dien thoai" in normalized or normalized == "sdt":
                     canonical = "Số điện thoại"
@@ -1363,23 +1323,22 @@ def clean_table_dataframe(dataframe: Any) -> Any:
                     canonical = "Quê quán"
                 elif "ngay thang nam sinh" in normalized or normalized == "ngay sinh":
                     canonical = "Ngày sinh"
-                elif "ten cong trinh" in normalized or normalized in {"ten ct", "cong trinh"}:
+                elif any(term in normalized for term in ("ten cong trinh", "ten ho chua", "ten ho", "ten dap", "ten kenh", "ten tram bom", "ten ke", "ten de", "ten mo han")):
                     canonical = "Tên công trình"
                 elif "dia diem" in normalized or "xa phuong dac khu" in normalized:
                     canonical = "Địa điểm"
                 elif "loai cong trinh" in normalized or "nhom cong trinh" in normalized:
                     canonical = "Loại công trình"
-                elif normalized in {"stt", "tt", "so thu tu"}:
+                elif normalized in {"stt", "tt", "so thu tu"} or normalized.endswith(" stt"):
                     canonical = "STT"
                 else:
                     canonical = canonical_column_name(column_name)
-
                 normalized_columns.append(canonical)
 
-            dataframe = dataframe.iloc[data_start_index:].copy()
+            dataframe = dataframe.iloc[header_index + 1:].copy()
             dataframe.columns = normalized_columns
 
-    # Tạo tên duy nhất nếu có cột trùng nhau.
+    # Tên cột duy nhất.
     seen: dict[str, int] = {}
     unique_columns: list[str] = []
     for column in dataframe.columns:
@@ -1392,22 +1351,16 @@ def clean_table_dataframe(dataframe: Any) -> Any:
     for column in dataframe.columns:
         dataframe[column] = dataframe[column].fillna("").astype(str).map(str.strip)
 
-    # Loại các dòng phân nhóm, tiêu đề lặp và dòng trống; không loại dữ liệu thật.
+    # Loại dòng trống sau khi cắt tiêu đề.
+    dataframe = dataframe.loc[
+        ~dataframe.apply(lambda row: all(not str(v).strip() for v in row), axis=1)
+    ]
+
     if "Họ và tên" in dataframe.columns:
-        excluded_names = {
-            "",
-            "ho va ten",
-            "cong chuc",
-            "vien chuc",
-            "hop dong",
-            "nguoi lao dong",
-        }
-        dataframe = dataframe[
-            ~dataframe["Họ và tên"].map(normalize_table_text).isin(excluded_names)
-        ]
+        excluded_names = {"", "ho va ten", "cong chuc", "vien chuc", "hop dong", "nguoi lao dong"}
+        dataframe = dataframe[~dataframe["Họ và tên"].map(normalize_table_text).isin(excluded_names)]
 
     return dataframe.reset_index(drop=True)
-
 
 def read_table_file(file_path: Path) -> dict[str, Any]:
     if not PANDAS_AVAILABLE:
@@ -1586,17 +1539,31 @@ def _resolve_structure_name_column(dataframe: Any) -> str | None:
 
 
 def _is_valid_structure_name(value: Any) -> bool:
+    """Chỉ chấp nhận tên công trình thật; loại đơn vị quản lý, tiêu đề và dòng tổng."""
     normalized = normalize_table_text(value)
     if not normalized:
         return False
-    excluded = {
-        "ten cong trinh", "cong trinh", "tong cong", "tong so", "cong",
-        "stt", "tt", "ghi chu", "danh muc", "loai cong trinh",
+    excluded_exact = {
+        "ten cong trinh", "ten ho chua", "ten ho", "cong trinh", "tong cong",
+        "tong so", "stt", "tt", "ghi chu", "danh muc", "loai cong trinh",
+        "ho chua nuoc lon", "ho chua nuoc vua", "ho chua nuoc nho",
     }
-    if normalized in excluded or normalized.startswith("tong "):
+    if normalized in excluded_exact or normalized.startswith("tong "):
+        return False
+
+    # Dòng phân nhóm/đơn vị quản lý không phải là một công trình.
+    organization_terms = (
+        "cong ty", "tnhh", "mtv", "chi cuc", "so nong nghiep", "ban quan ly",
+        "don vi quan ly", "ubnd", "uy ban nhan dan", "hop tac xa", "xí nghiep",
+        "xi nghiep", "trung tam", "phong nong nghiep", "to quan ly",
+    )
+    if any(term in normalized for term in organization_terms):
+        return False
+
+    # Dòng mô tả tiêu chí phân loại thường rất dài và chứa dấu so sánh/đơn vị.
+    if len(normalized.split()) > 14 and any(term in normalized for term in ("hmax", "m3", "luu luong", "phan loai")):
         return False
     return True
-
 
 def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str | None:
     """Tra cứu chung hồ chứa, đập, đê, kè, mỏ hàn, kênh, trạm bơm..."""
