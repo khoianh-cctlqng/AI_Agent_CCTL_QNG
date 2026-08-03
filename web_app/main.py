@@ -1203,7 +1203,7 @@ TABLE_COLUMN_ALIASES: dict[str, list[str]] = {
 
 # Các loại công trình được hiểu là thành phần của khái niệm chung “công trình”.
 STRUCTURE_TYPE_ALIASES: dict[str, list[str]] = {
-    "Hồ chứa": ["hồ chứa", "ho chua", "hồ", "ho", "hồ chứa nước", "ho chua nuoc"],
+    "Hồ chứa": ["hồ chứa", "ho chua", "hồ chứa nước", "ho chua nuoc", "dung tích hồ", "dung tich ho", "thông số hồ", "thong so ho", "danh sách hồ", "danh sach ho"],
     "Đập": ["đập", "dap", "đập dâng", "dap dang", "đập ngăn mặn", "dap ngan man"],
     "Đê": ["đê", "de", "đê sông", "de song", "đê biển", "de bien"],
     "Kè": ["kè", "ke", "kè sông", "ke song", "kè biển", "ke bien"],
@@ -2011,11 +2011,110 @@ def _person_match_score(question: str, person_name: Any) -> int:
 
     return 0
 
+
+
+def is_person_profile_query(question: str) -> bool:
+    """Nhận diện câu hỏi về một người; ưu tiên trước tra cứu công trình."""
+    normalized = normalize_table_text(question)
+    person_terms = (
+        "la ai", "thong tin ve", "ho so", "ly lich", "ngay sinh",
+        "chuc vu", "chuc danh", "que quan", "trinh do", "cccd",
+        "bhxh", "bhyt", "dien thoai", "so lien lac", "vao dang",
+    )
+    return any(term in normalized for term in person_terms)
+
+
+def lookup_person_profile(database: dict[str, Any], question: str) -> str | None:
+    """Tra cứu hồ sơ người theo cột Họ và tên, không nhầm họ Hồ với hồ chứa."""
+    if not is_person_profile_query(question) or not database.get("table_files"):
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for file_info in database.get("table_files", []):
+        file_path = resolve_table_path(file_info)
+        if not file_path.exists():
+            continue
+        try:
+            sheets = read_table_file_fast(file_path)
+        except Exception:
+            continue
+
+        for sheet_name, dataframe in sheets.items():
+            if dataframe is None or getattr(dataframe, "empty", True):
+                continue
+            name_column = _resolve_structured_column(dataframe, "Họ và tên")
+            if not name_column:
+                continue
+            for row_index, raw_name in dataframe[name_column].items():
+                score = _person_match_score(question, raw_name)
+                if score <= 0:
+                    continue
+                values: dict[str, str] = {}
+                for column in dataframe.columns:
+                    value = str(dataframe.at[row_index, column]).strip()
+                    if not value or normalize_table_text(value) in {"nan", "none"}:
+                        continue
+                    label = re.sub(r"\s+", " ", str(column)).strip()
+                    if normalize_table_text(label) in {"stt", "tt"}:
+                        continue
+                    values[label] = value
+                matches.append({
+                    "file": str(file_info.get("name", file_path.name)),
+                    "sheet": str(sheet_name),
+                    "row": int(row_index) + 1,
+                    "person": str(raw_name).strip(),
+                    "score": score,
+                    "values": values,
+                })
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item["score"], reverse=True)
+    best_score = matches[0]["score"]
+    best = [item for item in matches if item["score"] == best_score]
+    unique_people = {normalize_table_text(item["person"]) for item in best}
+    if len(unique_people) > 1:
+        names = sorted({item["person"] for item in best})
+        return (
+            "Tìm thấy nhiều người có tên gần giống. Vui lòng nhập đầy đủ họ và tên:\n- "
+            + "\n- ".join(names[:10])
+        )
+
+    item = best[0]
+    preferred_fields = [
+        "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
+        "Trình độ chuyên môn", "Trình độ LLCT", "Ngày vào Đảng",
+        "CCCD", "Số sổ BHXH", "Số thẻ BHYT", "Số điện thoại",
+    ]
+    rows: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for requested in preferred_fields:
+        for column, value in item["values"].items():
+            if normalize_table_text(column) == normalize_table_text(requested):
+                rows.append((requested, value))
+                used.add(column)
+                break
+    for column, value in item["values"].items():
+        if column not in used and len(rows) < 14:
+            rows.append((column, value))
+
+    table = "\n".join(f"| {label} | {value} |" for label, value in rows)
+    return (
+        f"**{item['person']}**\n\n"
+        "| Thông tin | Giá trị |\n|---|---|\n"
+        f"{table}\n\n"
+        f"**Nguồn bảng dữ liệu:** `{item['file']}` — sheet `{item['sheet']}` — dòng {item['row']}."
+    )
+
 def lookup_structured_table(
     database: dict[str, Any],
     question: str,
 ) -> str | None:
-    """Ưu tiên tra cứu dữ liệu có cấu trúc trước khi gọi Vector Store/OpenAI."""
+    """Ưu tiên dữ liệu người trước công trình để không nhầm họ Hồ với hồ chứa."""
+    person_profile_answer = lookup_person_profile(database, question)
+    if person_profile_answer:
+        return person_profile_answer
+
     infrastructure_answer = lookup_infrastructure_table(database, question)
     if infrastructure_answer:
         return infrastructure_answer
