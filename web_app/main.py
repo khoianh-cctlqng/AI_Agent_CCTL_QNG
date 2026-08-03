@@ -1131,6 +1131,50 @@ TABLE_COLUMN_ALIASES: dict[str, list[str]] = {
         "bao hiem y te", "bảo hiểm y tế",
     ],
     "Số điện thoại": ["dien thoai", "điện thoại", "so dien thoai", "sdt"],
+    "STT": ["stt", "tt", "số thứ tự", "so thu tu"],
+    "Tên công trình": [
+        "tên công trình", "ten cong trinh", "tên ct", "ten ct",
+        "công trình", "cong trinh", "tên hồ", "ten ho",
+        "tên đập", "ten dap", "tên kênh", "ten kenh",
+        "tên trạm bơm", "ten tram bom", "tên kè", "ten ke",
+        "tên đê", "ten de", "tên mỏ hàn", "ten mo han",
+    ],
+    "Địa điểm": [
+        "địa điểm", "dia diem", "xã phường đặc khu",
+        "xa phuong dac khu", "vị trí", "vi tri",
+    ],
+    "Loại công trình": [
+        "loại công trình", "loai cong trinh", "loại", "loai",
+        "nhóm công trình", "nhom cong trinh",
+    ],
+}
+
+
+# Các loại công trình được hiểu là thành phần của khái niệm chung “công trình”.
+STRUCTURE_TYPE_ALIASES: dict[str, list[str]] = {
+    "Hồ chứa": ["hồ chứa", "ho chua", "hồ", "ho", "hồ chứa nước", "ho chua nuoc"],
+    "Đập": ["đập", "dap", "đập dâng", "dap dang", "đập ngăn mặn", "dap ngan man"],
+    "Đê": ["đê", "de", "đê sông", "de song", "đê biển", "de bien"],
+    "Kè": ["kè", "ke", "kè sông", "ke song", "kè biển", "ke bien"],
+    "Mỏ hàn": ["mỏ hàn", "mo han", "mỏ hàn chỉnh trị", "mo han chinh tri"],
+    "Kênh": ["kênh", "kenh", "kênh tưới", "kenh tuoi", "kênh tiêu", "kenh tieu", "mương", "muong"],
+    "Trạm bơm": ["trạm bơm", "tram bom", "nhà máy bơm", "nha may bom"],
+    "Cống": ["cống", "cong", "cống lấy nước", "cong lay nuoc", "cống tiêu", "cong tieu"],
+    "Đập ngăn mặn": ["đập ngăn mặn", "dap ngan man", "ngăn mặn", "ngan man"],
+    "Công trình cấp nước": ["cấp nước", "cap nuoc", "công trình cấp nước", "cong trinh cap nuoc"],
+}
+
+# Từ khóa nhận diện loại công trình theo tên sheet/phụ lục.
+STRUCTURE_SHEET_HINTS: dict[str, list[str]] = {
+    "Hồ chứa": ["hcn", "ho chua", "ho chua nuoc", "pl2"],
+    "Đập": ["dap", "pl3"],
+    "Đập ngăn mặn": ["dnm", "dap ngan man", "pl4"],
+    "Trạm bơm": ["tram bom", "tb", "pl5"],
+    "Kè": ["ke", "pl6"],
+    "Mỏ hàn": ["mhan", "mo han", "pl7"],
+    "Đê": ["de", "pl8"],
+    "Kênh": ["kenh", "pl9"],
+    "Cống": ["cong", "pl10"],
 }
 
 
@@ -1188,7 +1232,7 @@ def clean_table_dataframe(dataframe: Any) -> Any:
     # CSV hoặc bảng đã có tên cột hợp lệ: chỉ chuẩn hóa tên cột như trước.
     existing_columns = [canonical_column_name(column) for column in dataframe.columns]
     existing_canonical = set(existing_columns)
-    if "Họ và tên" in existing_canonical:
+    if "Họ và tên" in existing_canonical or "Tên công trình" in existing_canonical:
         dataframe.columns = existing_columns
     else:
         # Excel được đọc với header=None. Tìm hàng tiêu đề chính trong 20 hàng đầu.
@@ -1202,6 +1246,16 @@ def clean_table_dataframe(dataframe: Any) -> Any:
             "cccd",
             "so so bhxh",
             "dien thoai",
+            "ten cong trinh",
+            "dia diem",
+            "loai cong trinh",
+            "nam ht",
+            "wtb",
+            "f tuoi",
+            "tram bom",
+            "kenh",
+            "ke",
+            "de",
         }
         header_index: int | None = None
         best_score = 0
@@ -1250,8 +1304,13 @@ def clean_table_dataframe(dataframe: Any) -> Any:
                     for value in candidate_children
                     if str(value).strip()
                 }
-                # File lý lịch có hàng con Nam/Nữ dưới cột ngày sinh.
-                if child_tokens.intersection({"nam", "nu"}):
+                # Bảng nhiều tầng: ngoài Nam/Nữ còn có TK/TT, thông số đập...
+                generic_child_tokens = {
+                    "nam", "nu", "tk", "tt", "hmax", "cao trinh",
+                    "tcs", "don vi", "km", "ha", "m", "m3",
+                }
+                non_empty_children = [token for token in child_tokens if token]
+                if child_tokens.intersection(generic_child_tokens) or len(non_empty_children) >= 2:
                     child_headers = candidate_children
                     data_start_index = header_index + 2
 
@@ -1304,6 +1363,14 @@ def clean_table_dataframe(dataframe: Any) -> Any:
                     canonical = "Quê quán"
                 elif "ngay thang nam sinh" in normalized or normalized == "ngay sinh":
                     canonical = "Ngày sinh"
+                elif "ten cong trinh" in normalized or normalized in {"ten ct", "cong trinh"}:
+                    canonical = "Tên công trình"
+                elif "dia diem" in normalized or "xa phuong dac khu" in normalized:
+                    canonical = "Địa điểm"
+                elif "loai cong trinh" in normalized or "nhom cong trinh" in normalized:
+                    canonical = "Loại công trình"
+                elif normalized in {"stt", "tt", "so thu tu"}:
+                    canonical = "STT"
                 else:
                     canonical = canonical_column_name(column_name)
 
@@ -1465,6 +1532,203 @@ def delete_table_file(database: dict[str, Any], table_file_id: str) -> None:
     save_database(database)
 
 
+
+def detect_requested_structure_types(question: str) -> list[str]:
+    """Nhận diện loại công trình; các loại đều thuộc khái niệm chung công trình."""
+    normalized = normalize_table_text(question)
+    detected: list[str] = []
+    # Ưu tiên loại cụ thể dài hơn để “đập ngăn mặn” không bị rút thành “đập”.
+    candidates: list[tuple[str, str]] = []
+    for structure_type, aliases in STRUCTURE_TYPE_ALIASES.items():
+        for alias in aliases:
+            candidates.append((structure_type, normalize_table_text(alias)))
+    for structure_type, alias in sorted(candidates, key=lambda item: len(item[1]), reverse=True):
+        if alias and re.search(rf"(^|\s){re.escape(alias)}(?=\s|$)", normalized):
+            if structure_type not in detected:
+                detected.append(structure_type)
+
+    # Loại tổng quát: “công trình” mà không nêu loại cụ thể nghĩa là toàn bộ công trình.
+    if not detected and any(term in normalized for term in ("cong trinh", "cong trinh thuy loi")):
+        return ["Công trình"]
+    return detected
+
+
+def classify_structure_sheet(sheet_name: str, dataframe: Any) -> str:
+    """Xác định loại công trình bằng tên sheet, cột Loại công trình và bộ cột đặc trưng."""
+    normalized_sheet = normalize_table_text(sheet_name)
+    for structure_type, hints in STRUCTURE_SHEET_HINTS.items():
+        for hint in sorted(hints, key=len, reverse=True):
+            norm_hint = normalize_table_text(hint)
+            if re.search(rf"(^|\s){re.escape(norm_hint)}(?=\s|$)", normalized_sheet):
+                return structure_type
+
+    columns = {normalize_table_text(column) for column in getattr(dataframe, "columns", [])}
+    joined = " ".join(sorted(columns))
+    if any(term in joined for term in ("wtb", "f tuoi", "dung tich", "hmax", "cao trinh dinh dap")):
+        return "Hồ chứa"
+    if "cong suat may" in joined or "luu luong bom" in joined:
+        return "Trạm bơm"
+    if "chieu dai kenh" in joined or "luu luong thiet ke" in joined:
+        return "Kênh"
+    return "Công trình"
+
+
+def _resolve_structure_name_column(dataframe: Any) -> str | None:
+    column = _resolve_structured_column(dataframe, "Tên công trình")
+    if column:
+        return column
+    # Dự phòng an toàn cho bảng cũ chưa chuẩn hóa tên cột.
+    for candidate in dataframe.columns:
+        normalized = normalize_table_text(candidate)
+        if "ten cong trinh" in normalized or normalized in {"ten ct", "cong trinh"}:
+            return str(candidate)
+    return None
+
+
+def _is_valid_structure_name(value: Any) -> bool:
+    normalized = normalize_table_text(value)
+    if not normalized:
+        return False
+    excluded = {
+        "ten cong trinh", "cong trinh", "tong cong", "tong so", "cong",
+        "stt", "tt", "ghi chu", "danh muc", "loai cong trinh",
+    }
+    if normalized in excluded or normalized.startswith("tong "):
+        return False
+    return True
+
+
+def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str | None:
+    """Tra cứu chung hồ chứa, đập, đê, kè, mỏ hàn, kênh, trạm bơm..."""
+    requested_types = detect_requested_structure_types(question)
+    if not requested_types or not database.get("table_files"):
+        return None
+
+    normalized_question = normalize_table_text(question)
+    records: list[dict[str, Any]] = []
+
+    for file_info in database.get("table_files", []):
+        file_path = resolve_table_path(file_info)
+        if not file_path.exists():
+            continue
+        try:
+            sheets = read_table_file(file_path)
+        except Exception:
+            continue
+
+        for sheet_name, dataframe in sheets.items():
+            if dataframe is None or getattr(dataframe, "empty", True):
+                continue
+            inferred_type = classify_structure_sheet(str(sheet_name), dataframe)
+            type_column = _resolve_structured_column(dataframe, "Loại công trình")
+            name_column = _resolve_structure_name_column(dataframe)
+            if not name_column:
+                continue
+
+            for row_index, raw_name in dataframe[name_column].items():
+                name = str(raw_name).strip()
+                if not _is_valid_structure_name(name):
+                    continue
+                row_type = inferred_type
+                if type_column:
+                    raw_type = str(dataframe.at[row_index, type_column]).strip()
+                    detected_row_types = detect_requested_structure_types(raw_type)
+                    if detected_row_types:
+                        row_type = detected_row_types[0]
+
+                if requested_types != ["Công trình"] and row_type not in requested_types:
+                    continue
+
+                row_values = {
+                    str(column): str(dataframe.at[row_index, column]).strip()
+                    for column in dataframe.columns
+                    if str(dataframe.at[row_index, column]).strip()
+                    and normalize_table_text(dataframe.at[row_index, column]) not in {"nan", "none"}
+                }
+                records.append({
+                    "file": str(file_info.get("name", file_path.name)),
+                    "sheet": str(sheet_name),
+                    "row": int(row_index) + 1,
+                    "type": row_type,
+                    "name": name,
+                    "values": row_values,
+                })
+
+    if not records:
+        type_text = ", ".join(requested_types).lower()
+        return (
+            f"Chưa tìm thấy dữ liệu **{type_text}** trong kho bảng dữ liệu.\n\n"
+            "**Khuyến cáo kiểm tra:** Chọn đúng file/sheet và kiểm tra bảng có cột "
+            "`Tên công trình` hoặc tên sheet thể hiện loại công trình."
+        )
+
+    # Loại trùng cùng tên, cùng loại trong cùng nguồn.
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in records:
+        key = (
+            item["file"], item["sheet"], item["type"], normalize_table_text(item["name"])
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    records = unique
+
+    # Nếu câu hỏi chứa chính xác tên công trình, trả thông số của dòng đó.
+    named_matches = [
+        item for item in records
+        if normalize_table_text(item["name"]) in normalized_question
+    ]
+    if named_matches:
+        item = max(named_matches, key=lambda x: len(normalize_table_text(x["name"])))
+        ignored = {"STT", "Tên công trình", "Cột 1", "Cột 2"}
+        rows = []
+        for field, value in item["values"].items():
+            if field in ignored or normalize_table_text(field).startswith("cot "):
+                continue
+            rows.append(f"| {field} | {value} |")
+        details = "\n".join(rows[:24]) or "| Loại công trình | " + item["type"] + " |"
+        return (
+            f"**{item['name']}** là **{item['type'].lower()}** trong kho bảng dữ liệu.\n\n"
+            "| Thông tin | Giá trị |\n|---|---|\n"
+            f"| Loại công trình | {item['type']} |\n{details}\n\n"
+            "**Nguồn bảng dữ liệu:**\n"
+            f"- `{item['file']}` — sheet `{item['sheet']}`, dòng dữ liệu {item['row']}."
+        )
+
+    asks_count = any(term in normalized_question for term in (
+        "bao nhieu", "tong so", "so luong", "dem", "co may"
+    ))
+    asks_list = any(term in normalized_question for term in (
+        "danh sach", "liet ke", "gom nhung", "nhung cong trinh nao"
+    ))
+
+    type_label = "công trình" if requested_types == ["Công trình"] else ", ".join(requested_types).lower()
+    sources = []
+    for item in records:
+        source = f"`{item['file']}` — sheet `{item['sheet']}`"
+        if source not in sources:
+            sources.append(source)
+
+    if asks_count and not asks_list:
+        return (
+            f"Có **{len(records)} {type_label}** trong kho bảng dữ liệu.\n\n"
+            "**Nguồn bảng dữ liệu:**\n- " + "\n- ".join(sources)
+        )
+
+    table_rows = "\n".join(
+        f"| {index} | {item['name']} | {item['type']} | {item['sheet']} |"
+        for index, item in enumerate(records, start=1)
+    )
+    return (
+        f"Tìm thấy **{len(records)} {type_label}**.\n\n"
+        "| STT | Tên công trình | Loại công trình | Sheet nguồn |\n"
+        "|---:|---|---|---|\n"
+        f"{table_rows}\n\n"
+        "**Nguồn bảng dữ liệu:**\n- " + "\n- ".join(sources)
+    )
+
+
 def detect_requested_table_field(question: str) -> str:
     """Nhận diện trường cần tra, kể cả cách viết đầy đủ bằng tiếng Việt."""
     normalized = normalize_table_text(question)
@@ -1600,6 +1864,10 @@ def lookup_structured_table(
     question: str,
 ) -> str | None:
     """Ưu tiên tra cứu dữ liệu có cấu trúc trước khi gọi Vector Store/OpenAI."""
+    infrastructure_answer = lookup_infrastructure_table(database, question)
+    if infrastructure_answer:
+        return infrastructure_answer
+
     requested_field = detect_requested_table_field(question)
     if not requested_field or not database.get("table_files"):
         return None
