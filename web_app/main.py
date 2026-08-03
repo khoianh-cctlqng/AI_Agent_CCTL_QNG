@@ -1396,12 +1396,47 @@ def save_table_file(
     stored_path.write_bytes(uploaded_file.getbuffer())
 
     sheets = read_table_file(stored_path)
+    sheet_stats = {
+        str(name): {
+            "rows": int(len(frame)),
+            "columns": [str(column) for column in frame.columns],
+        }
+        for name, frame in sheets.items()
+    }
+    non_empty_sheets = [
+        name for name, frame in sheets.items()
+        if frame is not None and not getattr(frame, "empty", True)
+    ]
+    if not non_empty_sheets:
+        stored_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "File đã mở được nhưng không nhận diện được dòng dữ liệu. "
+            "Hãy kiểm tra hàng tiêu đề hoặc gửi file để chỉnh bộ đọc bảng."
+        )
+
+    # Cùng một tên file: xóa bản cũ trước khi lưu bản mới để tránh Agent đọc nhầm
+    # bản đã nạp trước đó (ví dụ còn sheet SGV trong khi file mới là Sheet1).
+    old_items = [
+        item for item in database.get("table_files", [])
+        if str(item.get("name", "")).casefold() == original_name.casefold()
+    ]
+    for old_item in old_items:
+        try:
+            resolve_table_path(old_item).unlink(missing_ok=True)
+        except Exception:
+            pass
+    database["table_files"] = [
+        item for item in database.get("table_files", [])
+        if str(item.get("name", "")).casefold() != original_name.casefold()
+    ]
+
     metadata = {
         "id": uuid.uuid4().hex,
         "name": original_name,
         "stored_name": stored_name,
         "uploaded_at": now_text(),
         "sheet_names": list(sheets.keys()),
+        "sheet_stats": sheet_stats,
     }
     database.setdefault("table_files", []).append(metadata)
     save_database(database)
@@ -1509,15 +1544,21 @@ def _person_match_score(question: str, person_name: Any) -> int:
     if not matched_tokens:
         return 0
 
-    # Không tự nhận một người chỉ từ một từ quá phổ biến như họ hoặc tên đơn lẻ.
+    # Cho phép gọi bằng tên cuối (ví dụ “chị Dung”) với điểm thấp.
+    # Nếu có nhiều người cùng tên, phần xử lý phía dưới sẽ yêu cầu người dùng làm rõ,
+    # tuyệt đối không tự chọn một người.
+    single_last_name_bonus = 0
     if len(name_tokens) >= 3 and len(matched_tokens) < 2:
-        return 0
+        if name_tokens[-1] in question_tokens:
+            single_last_name_bonus = 25
+        else:
+            return 0
 
     # Cụm tên cuối thường là cách người dùng gọi tắt, ví dụ “Đoan Dung”.
     tail_two = " ".join(name_tokens[-2:]) if len(name_tokens) >= 2 else name_tokens[-1]
     tail_bonus = 200 if tail_two and tail_two in normalized_question else 0
     coverage = int(100 * len(matched_tokens) / len(name_tokens))
-    return coverage + tail_bonus + len(matched_tokens) * 10
+    return coverage + tail_bonus + len(matched_tokens) * 10 + single_last_name_bonus
 
 
 def lookup_structured_table(
@@ -2677,18 +2718,23 @@ with st.sidebar:
                         selected_sheet = st.selectbox(
                             "Sheet",
                             options=list(sheets.keys()),
-                            key="selected_table_sheet",
+                            key=f"selected_table_sheet_{selected_id}",
                         )
                         dataframe = sheets[selected_sheet]
+                        st.caption(
+                            f"Đang đọc đúng file: {selected_info.get('name', '')} | "
+                            f"Sheet: {selected_sheet} | {len(dataframe)} dòng | "
+                            f"{len(dataframe.columns)} cột"
+                        )
 
                         filter_column = st.selectbox(
                             "Lọc theo cột",
                             options=["— Không lọc —"] + list(dataframe.columns),
-                            key="table_filter_column",
+                            key=f"table_filter_column_{selected_id}_{selected_sheet}",
                         )
                         filter_text = st.text_input(
                             "Từ khóa lọc",
-                            key="table_filter_text",
+                            key=f"table_filter_text_{selected_id}_{selected_sheet}",
                             placeholder="Nhập họ tên, chức vụ, địa phương...",
                         )
 
