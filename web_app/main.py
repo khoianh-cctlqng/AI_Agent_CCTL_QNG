@@ -1745,6 +1745,14 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
                     display_field = field_text
                 pending_parent = ""
 
+            # Excel thường lưu tiêu đề bằng nhiều dòng trong cùng một ô
+            # (Alt+Enter), ví dụ "Cao\ntrình\nđỉnh\nđập/TCS\n(m)".
+            # Markdown/HTML sẽ hiển thị các dòng đó như nhiều hàng, khiến cột
+            # Thông tin trông bị “nhảy dòng”. Gom toàn bộ xuống dòng, tab và
+            # khoảng trắng liên tiếp thành một khoảng trắng trước khi xuất.
+            display_field = re.sub(r"\s+", " ", display_field).strip()
+            value_text = re.sub(r"\s+", " ", value_text).strip()
+
             # Chuẩn hóa cách viết một số đơn vị thường gặp.
             display_field = (
                 display_field
