@@ -2690,6 +2690,7 @@ def stream_openai_answer(
     use_file_search: bool,
     fast_mode: bool,
     deep_mode: bool = False,
+    structured_context: str = "",
 ):
     if deep_mode:
         model = DEEP_MODEL
@@ -2700,6 +2701,37 @@ def stream_openai_answer(
 
     api_input = build_api_input(messages)
     instructions = SYSTEM_INSTRUCTIONS
+
+    # Dữ liệu có cấu trúc từ kho bảng được đưa vào cùng lượt trả lời để
+    # mô hình đối chiếu song song với kho tài liệu dùng chung.
+    if structured_context:
+        api_input.append(
+            {
+                "role": "user",
+                "content": (
+                    "DỮ LIỆU TRA CỨU CHÍNH XÁC TỪ KHO BẢNG:\n"
+                    f"{structured_context}\n\n"
+                    "Hãy giữ nguyên tên, số liệu, file, sheet và dòng nguồn trong "
+                    "kết quả bảng. Tiếp tục đối chiếu kho tài liệu dùng chung; "
+                    "nếu hai kho bổ sung cho nhau thì tổng hợp, nếu mâu thuẫn thì "
+                    "nêu rõ từng nguồn và không tự chọn một giá trị."
+                ),
+            }
+        )
+        instructions += """
+
+YÊU CẦU KẾT HỢP HAI KHO DỮ LIỆU:
+- Luôn xem dữ liệu trong KHO BẢNG là nguồn có cấu trúc, dùng cho tên đối tượng, cột và số liệu chính xác.
+- Đồng thời tra cứu KHO TÀI LIỆU DÙNG CHUNG để bổ sung căn cứ, quy định, mô tả, phạm vi và bối cảnh.
+- Không bỏ qua nguồn nào chỉ vì đã tìm thấy câu trả lời ở nguồn còn lại.
+- Không được sửa, làm tròn, suy diễn hoặc thay đổi số liệu lấy từ kho bảng.
+- Nếu hai nguồn phù hợp nhau, trả lời gộp thành một kết luận ngắn gọn.
+- Nếu hai nguồn mâu thuẫn, tách rõ: **Theo kho bảng:** và **Theo kho tài liệu:**; yêu cầu kiểm tra file gốc.
+- Cuối câu trả lời giữ riêng hai mục nguồn khi có dữ liệu:
+  **Nguồn bảng dữ liệu:** ...
+  **Nguồn văn bản trong kho:** ...
+"""
+
     vector_store_id = ""
     diagnostics: dict[str, Any] = {
         "enabled": use_file_search,
@@ -2820,7 +2852,7 @@ def stream_openai_answer(
             for name in all_sources
         )
 
-        if sensitive_field and has_pdf_source:
+        if sensitive_field and has_pdf_source and not structured_context:
             st.session_state["rag_diagnostics"] = diagnostics
             yield (
                 f"Chưa thể xác nhận chính xác **{sensitive_field}** từ file PDF này. "
@@ -2835,9 +2867,13 @@ def stream_openai_answer(
             return
 
         # Với nguồn không phải PDF, vẫn yêu cầu nhãn và giá trị nằm gần nhau.
-        if sensitive_field and not has_explicit_labeled_value(
-            combined_context,
-            sensitive_field,
+        if (
+            sensitive_field
+            and not structured_context
+            and not has_explicit_labeled_value(
+                combined_context,
+                sensitive_field,
+            )
         ):
             st.session_state["rag_diagnostics"] = diagnostics
             yield build_sensitive_field_warning(
@@ -3794,12 +3830,14 @@ if question:
     )
     with st.chat_message("user", avatar="👤"):
         st.markdown(displayed_question)
-    structured_table_answer = lookup_structured_table(
-        database,
-        question,
-    )
+    # Tra cứu song song cả kho bảng và kho tài liệu dùng chung.
+    # Kho bảng cung cấp dữ liệu có cấu trúc; kho tài liệu cung cấp căn cứ,
+    # mô tả và nội dung văn bản. Không dừng sớm khi mới tìm thấy một kho.
+    structured_table_answer = lookup_structured_table(database, question)
+    has_document_repository = bool(database.get("uploaded_files"))
 
-    if structured_table_answer:
+    # Chỉ trả thẳng từ bảng khi thực tế chưa có tài liệu dùng chung để đối chiếu.
+    if structured_table_answer and not has_document_repository:
         answer = structured_table_answer
         with st.chat_message("assistant", avatar="💧"):
             render_assistant_content(answer)
@@ -3823,12 +3861,20 @@ if question:
                         and question_requests_documents(question)
                     )
                 )
-                effective_file_search = use_file_search or auto_document_search
+                # Khi đã có kho tài liệu dùng chung, luôn tra cứu kho này song song
+                # với kết quả kho bảng để tránh bỏ sót nội dung.
+                effective_file_search = (
+                    use_file_search
+                    or auto_document_search
+                    or has_document_repository
+                )
                 effective_fast_mode = fast_mode
                 effective_deep_mode = deep_mode
 
                 spinner_text = (
-                    "Đang phân tích chuyên sâu..."
+                    "Đang đối chiếu kho bảng và kho tài liệu..."
+                    if structured_table_answer and effective_file_search
+                    else "Đang phân tích chuyên sâu..."
                     if effective_deep_mode
                     else "Đang tra cứu nhanh..."
                     if effective_file_search
@@ -3844,6 +3890,7 @@ if question:
                         use_file_search=effective_file_search,
                         fast_mode=effective_fast_mode,
                         deep_mode=effective_deep_mode,
+                        structured_context=structured_table_answer or "",
                     ):
                         if text_delta:
                             answer_parts.append(str(text_delta))
