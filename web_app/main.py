@@ -3164,6 +3164,80 @@ conversation = get_active_conversation(database)
 # =========================================================
 # SIDEBAR TRÁI
 # =========================================================
+# CSS riêng cho hai nút nạp dữ liệu của Streamlit.
+# Nút gốc của st.file_uploader dùng chữ “Upload”; CSS dưới đây
+# thay phần hiển thị bằng mũi tên hướng lên màu xanh và tiếng Việt.
+st.markdown(
+    """
+    <style>
+    /* Việt hóa chắc chắn nút chọn tệp của cả hai kho. */
+    [data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stFileUploader"] button {
+        position: relative !important;
+        min-width: 13.4rem !important;
+        height: 2.45rem !important;
+        color: transparent !important;
+        font-size: 0 !important;
+        border: 1px solid rgba(49, 51, 63, 0.20) !important;
+        border-radius: 0.60rem !important;
+        background: #ffffff !important;
+        box-shadow: none !important;
+        overflow: hidden !important;
+    }
+
+    /* Streamlit đặt chữ Upload trong p/span/div và icon trong svg.
+       Ẩn toàn bộ phần tử con để chữ tiếng Anh không còn lộ ra. */
+    [data-testid="stFileUploaderDropzone"] button *,
+    [data-testid="stFileUploader"] button * {
+        visibility: hidden !important;
+        opacity: 0 !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button::before,
+    [data-testid="stFileUploader"] button::before {
+        content: "↑" !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: absolute !important;
+        left: 0.82rem !important;
+        top: 50% !important;
+        transform: translateY(-53%) !important;
+        color: #1976d2 !important;
+        font-size: 1.25rem !important;
+        font-weight: 800 !important;
+        line-height: 1 !important;
+        z-index: 2 !important;
+        pointer-events: none !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button::after,
+    [data-testid="stFileUploader"] button::after {
+        content: "Nạp dữ liệu vào kho" !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: absolute !important;
+        left: 2.15rem !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        color: #262730 !important;
+        font-size: 0.88rem !important;
+        font-weight: 500 !important;
+        line-height: 1 !important;
+        white-space: nowrap !important;
+        z-index: 2 !important;
+        pointer-events: none !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button:hover,
+    [data-testid="stFileUploader"] button:hover {
+        background: #f5f7fa !important;
+        border-color: rgba(25, 118, 210, 0.45) !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.sidebar:
     st.markdown(
         """
@@ -3510,13 +3584,9 @@ with st.sidebar:
         st.caption(
             "Các chức năng quản trị được thu gọn để tránh làm rối giao diện sử dụng hằng ngày."
         )
-        st.markdown("**Làm sạch tệp tạm**")
-        st.caption(
-            "Xóa các tệp tên tạm như tmp..., temp... còn sót trong Vector Store; "
-            "các tệp có tên gốc được giữ nguyên."
-        )
+
         if st.button(
-            "🧹 Làm sạch tệp tạm trong kho",
+            "🧹 Làm sạch tệp tạm",
             key="cleanup_temporary_repository_files",
             use_container_width=True,
         ):
@@ -3534,18 +3604,80 @@ with st.sidebar:
                 else:
                     st.success("Kho không còn tệp tạm cần xóa.")
                 if errors:
-                    st.warning(
-                        "Một số mục chưa làm sạch được: "
-                        + " | ".join(errors[:3])
-                    )
+                    st.warning("Một số mục chưa làm sạch được: " + " | ".join(errors[:3]))
                 st.rerun()
             except Exception as error:
                 st.error(f"Không thể làm sạch kho: {error}")
 
-        st.markdown("**Thông tin quản trị**")
-        st.caption(
-            f"Danh mục cục bộ đang ghi nhận {len(database.get('uploaded_files', []))} tệp văn bản."
-        )
+        if st.button(
+            "🔄 Đồng bộ lại danh mục kho",
+            key="synchronize_text_repository",
+            use_container_width=True,
+        ):
+            try:
+                client = get_client()
+                vector_store_id = ensure_vector_store(client, database)
+                remote_page = client.vector_stores.files.list(
+                    vector_store_id=vector_store_id,
+                    limit=100,
+                )
+                remote_ids = {
+                    str(getattr(item, "id", "") or getattr(item, "file_id", ""))
+                    for item in getattr(remote_page, "data", [])
+                }
+                before = len(database.get("uploaded_files", []))
+                database["uploaded_files"] = [
+                    item for item in database.get("uploaded_files", [])
+                    if str(item.get("openai_file_id", "")) in remote_ids
+                ]
+                save_database(database)
+                removed_count = before - len(database.get("uploaded_files", []))
+                st.success(
+                    f"Đã đồng bộ danh mục; loại {removed_count} mục cục bộ không còn trong kho."
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(f"Không thể đồng bộ danh mục kho: {error}")
+
+        if st.button(
+            "🔍 Kiểm tra tệp trùng lặp",
+            key="check_duplicate_text_files",
+            use_container_width=True,
+        ):
+            names = [
+                str(item.get("name", "")).strip().casefold()
+                for item in database.get("uploaded_files", [])
+                if str(item.get("name", "")).strip()
+            ]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                st.warning("Tệp trùng tên: " + " | ".join(duplicates[:10]))
+            else:
+                st.success("Không phát hiện tệp trùng tên trong danh mục hiện tại.")
+
+        if st.button(
+            "📊 Thống kê kho dữ liệu dạng văn bản",
+            key="text_repository_statistics",
+            use_container_width=True,
+        ):
+            try:
+                client = get_client()
+                vector_store_id = ensure_vector_store(client, database)
+                vector_store = client.vector_stores.retrieve(vector_store_id=vector_store_id)
+                counts = vector_store.file_counts
+                st.info(
+                    f"Danh mục: {len(database.get('uploaded_files', []))} tệp | "
+                    f"Hoàn tất: {counts.completed} | Đang xử lý: {counts.in_progress} | "
+                    f"Lỗi: {counts.failed} | Tổng trên Vector Store: {counts.total}."
+                )
+            except Exception as error:
+                st.error(f"Không thống kê được kho: {error}")
+
+        with st.expander("📋 Nhật ký bảo trì", expanded=False):
+            st.caption(
+                "Nhật ký chi tiết sẽ được bổ sung khi hệ thống dùng cơ sở dữ liệu quản trị riêng. "
+                "Hiện tại các kết quả bảo trì được thông báo ngay sau từng thao tác."
+            )
 
 
 
@@ -3714,20 +3846,123 @@ with st.sidebar:
 
                 with st.expander("🛠️ Bảo trì kho dữ liệu dạng bảng", expanded=False):
                     st.caption(
-                        "Làm mới bộ nhớ đệm, đọc lại tiêu đề nhiều tầng và thống kê dữ liệu."
+                        "Làm sạch tệp lỗi, đọc lại tiêu đề nhiều tầng, kiểm tra trùng lặp và thống kê dữ liệu."
                     )
+
                     if st.button(
-                        "🔄 Đọc lại bảng và làm mới bộ nhớ đệm",
+                        "🧹 Làm sạch bảng lỗi hoặc bị mất",
+                        key="clean_missing_structured_tables",
+                        use_container_width=True,
+                    ):
+                        before = len(database.get("table_files", []))
+                        database["table_files"] = [
+                            item for item in database.get("table_files", [])
+                            if resolve_table_path(item).exists()
+                        ]
+                        save_database(database)
+                        removed_count = before - len(database.get("table_files", []))
+                        st.success(f"Đã loại {removed_count} mục bảng lỗi hoặc không còn tệp gốc.")
+                        st.rerun()
+
+                    if st.button(
+                        "🔄 Đọc lại tiêu đề nhiều tầng và làm mới bộ nhớ đệm",
                         key="refresh_structured_table_cache",
                         use_container_width=True,
                     ):
                         _read_table_file_cached.clear()
                         st.success(
-                            "Đã xóa bộ nhớ đệm. Lần tra cứu tiếp theo sẽ đọc lại bảng từ tệp gốc."
+                            "Đã xóa bộ nhớ đệm; lần tra cứu tiếp theo sẽ đọc lại tệp gốc và chuẩn hóa tiêu đề."
                         )
-                    st.caption(
-                        "Tên cột và tiêu đề nhiều tầng sẽ được chuẩn hóa lại tự động khi bảng được đọc lại."
-                    )
+
+                    if st.button(
+                        "🧩 Kiểm tra cột chưa nhận diện",
+                        key="check_unrecognized_table_columns",
+                        use_container_width=True,
+                    ):
+                        unknown_columns: list[str] = []
+                        known_terms = {
+                            "tt", "stt", "tên công trình", "tên hồ chứa", "họ và tên",
+                            "địa điểm", "chức vụ", "quê quán", "cccd", "số sổ bhxh",
+                            "điện thoại liên lạc", "năm ht", "flv", "wtb",
+                        }
+                        for item in database.get("table_files", []):
+                            path = resolve_table_path(item)
+                            if not path.exists():
+                                continue
+                            try:
+                                for sheet_name, frame in read_table_file_fast(path).items():
+                                    for column in frame.columns:
+                                        normalized_column = normalize_table_text(str(column))
+                                        if normalized_column and not any(
+                                            normalize_table_text(term) in normalized_column
+                                            or normalized_column in normalize_table_text(term)
+                                            for term in known_terms
+                                        ):
+                                            unknown_columns.append(
+                                                f"{item.get('name', path.name)} / {sheet_name}: {column}"
+                                            )
+                            except Exception:
+                                continue
+                        if unknown_columns:
+                            st.warning("Cột cần rà soát: " + " | ".join(unknown_columns[:12]))
+                        else:
+                            st.success("Chưa phát hiện cột cần rà soát trong các bảng đọc được.")
+
+                    if st.button(
+                        "🔍 Kiểm tra tệp bảng trùng lặp",
+                        key="check_duplicate_table_files",
+                        use_container_width=True,
+                    ):
+                        names = [
+                            str(item.get("name", "")).strip().casefold()
+                            for item in database.get("table_files", [])
+                            if str(item.get("name", "")).strip()
+                        ]
+                        duplicates = sorted({name for name in names if names.count(name) > 1})
+                        if duplicates:
+                            st.warning("Tệp bảng trùng tên: " + " | ".join(duplicates[:10]))
+                        else:
+                            st.success("Không phát hiện tệp bảng trùng tên.")
+
+                    if st.button(
+                        "🔗 Kiểm tra liên kết dữ liệu công trình",
+                        key="check_structure_data_links",
+                        use_container_width=True,
+                    ):
+                        st.info(
+                            "Hệ thống sẽ đối chiếu các trường tên công trình, tên hồ chứa, đập, đê, kè, "
+                            "mỏ hàn, kênh và trạm bơm khi tra cứu. Các cột chưa nhận diện được liệt kê ở mục trên."
+                        )
+
+                    if st.button(
+                        "📊 Thống kê kho dữ liệu dạng bảng",
+                        key="structured_repository_statistics",
+                        use_container_width=True,
+                    ):
+                        total_sheets = 0
+                        total_rows = 0
+                        total_columns = 0
+                        for item in database.get("table_files", []):
+                            path = resolve_table_path(item)
+                            if not path.exists():
+                                continue
+                            try:
+                                sheets = read_table_file_fast(path)
+                                total_sheets += len(sheets)
+                                total_rows += sum(len(frame) for frame in sheets.values())
+                                total_columns += sum(len(frame.columns) for frame in sheets.values())
+                            except Exception:
+                                continue
+                        st.info(
+                            f"Tệp: {len(database.get('table_files', []))} | Sheet: {total_sheets} | "
+                            f"Dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}."
+                        )
+
+                    with st.expander("📋 Nhật ký bảo trì", expanded=False):
+                        st.caption(
+                            "Các kết quả bảo trì được hiển thị ngay sau từng thao tác. "
+                            "Nhật ký lưu dài hạn sẽ được bổ sung khi triển khai cơ sở dữ liệu quản trị riêng."
+                        )
 
     if use_file_search and st.session_state.get("rag_diagnostics"):
         diagnostic = st.session_state["rag_diagnostics"]
