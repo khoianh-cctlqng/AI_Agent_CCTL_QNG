@@ -24,13 +24,6 @@ except ImportError:
     PANDAS_AVAILABLE = False
 
 try:
-    from openpyxl import load_workbook
-    OPENPYXL_AVAILABLE = True
-except ImportError:
-    load_workbook = None
-    OPENPYXL_AVAILABLE = False
-
-try:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Inches, Pt
@@ -1056,7 +1049,6 @@ def load_database() -> dict[str, Any]:
     if configured_vector_store_id:
         database["vector_store_id"] = configured_vector_store_id
 
-    reconcile_table_files(database)
     return database
 
 
@@ -1350,50 +1342,6 @@ def clean_table_dataframe(dataframe: Any) -> Any:
     return dataframe.reset_index(drop=True)
 
 
-def _read_xlsx_with_merged_cells(file_path: Path) -> dict[str, Any]:
-    """Đọc đúng workbook Excel và trải giá trị ô gộp ra toàn vùng gộp.
-
-    Cách này đặc biệt cần cho các biểu mẫu hành chính có tiêu đề hai tầng,
-    vì pandas đọc trực tiếp thường để trống các ô thuộc vùng merge và dễ làm
-    sai tên cột hoặc nhận nhầm sheet cũ.
-    """
-    if not OPENPYXL_AVAILABLE or load_workbook is None:
-        raise RuntimeError("Chưa cài openpyxl.")
-
-    workbook = load_workbook(
-        filename=file_path,
-        data_only=True,
-        read_only=False,
-    )
-    result: dict[str, Any] = {}
-
-    for worksheet in workbook.worksheets:
-        max_row = int(worksheet.max_row or 0)
-        max_column = int(worksheet.max_column or 0)
-        if max_row <= 0 or max_column <= 0:
-            result[str(worksheet.title)] = pd.DataFrame()
-            continue
-
-        rows = [
-            [worksheet.cell(row=row, column=column).value for column in range(1, max_column + 1)]
-            for row in range(1, max_row + 1)
-        ]
-
-        # Trải nội dung ô trên-trái ra toàn bộ vùng gộp để giữ đúng nhóm tiêu đề.
-        for merged_range in worksheet.merged_cells.ranges:
-            min_col, min_row, max_col, max_row_range = merged_range.bounds
-            value = rows[min_row - 1][min_col - 1]
-            for row in range(min_row, max_row_range + 1):
-                for column in range(min_col, max_col + 1):
-                    rows[row - 1][column - 1] = value
-
-        raw_dataframe = pd.DataFrame(rows)
-        result[str(worksheet.title)] = clean_table_dataframe(raw_dataframe)
-
-    workbook.close()
-    return result
-
-
 def read_table_file(file_path: Path) -> dict[str, Any]:
     if not PANDAS_AVAILABLE:
         raise RuntimeError("Chưa cài pandas/openpyxl.")
@@ -1414,31 +1362,21 @@ def read_table_file(file_path: Path) -> dict[str, Any]:
         raise RuntimeError(f"Không đọc được CSV: {last_error}")
 
     if file_path.suffix.lower() == ".xlsx":
-        # Ưu tiên openpyxl để lấy đúng tên sheet thật và cấu trúc ô gộp.
-        try:
-            return _read_xlsx_with_merged_cells(file_path)
-        except Exception as openpyxl_error:
-            # Phương án dự phòng cho các workbook đặc biệt.
-            try:
-                sheets = pd.read_excel(
-                    file_path,
-                    sheet_name=None,
-                    header=None,
-                    dtype=str,
-                    keep_default_na=False,
-                    engine="openpyxl",
-                )
-                return {
-                    str(name): clean_table_dataframe(frame)
-                    for name, frame in sheets.items()
-                }
-            except Exception as pandas_error:
-                raise RuntimeError(
-                    "Không đọc được file Excel. "
-                    f"openpyxl: {openpyxl_error}; pandas: {pandas_error}"
-                ) from pandas_error
+        sheets = pd.read_excel(
+            file_path,
+            sheet_name=None,
+            header=None,
+            dtype=str,
+            keep_default_na=False,
+            engine="openpyxl",
+        )
+        return {
+            str(name): clean_table_dataframe(frame)
+            for name, frame in sheets.items()
+        }
 
     raise RuntimeError("Chỉ nhận file .xlsx hoặc .csv.")
+
 
 def save_table_file(
     database: dict[str, Any],
@@ -1499,41 +1437,10 @@ def save_table_file(
         "uploaded_at": now_text(),
         "sheet_names": list(sheets.keys()),
         "sheet_stats": sheet_stats,
-        "file_size": int(stored_path.stat().st_size),
     }
     database.setdefault("table_files", []).append(metadata)
     save_database(database)
     return metadata
-
-
-def reconcile_table_files(database: dict[str, Any]) -> bool:
-    """Dọn metadata bảng cũ/mất file và chỉ giữ bản mới nhất của mỗi tên file."""
-    original_items = list(database.get("table_files", []) or [])
-    valid_items: list[dict[str, Any]] = []
-
-    for item in original_items:
-        stored_name = str(item.get("stored_name", "")).strip()
-        if not stored_name:
-            continue
-        path = TABLE_DATA_DIR / stored_name
-        if not path.exists() or not path.is_file():
-            continue
-        valid_items.append(item)
-
-    # Bản mới nhất thắng nếu trước đây cùng tên file đã nạp nhiều lần.
-    latest_by_name: dict[str, dict[str, Any]] = {}
-    for item in valid_items:
-        key = str(item.get("name", "")).strip().casefold()
-        current = latest_by_name.get(key)
-        if current is None or str(item.get("uploaded_at", "")) >= str(current.get("uploaded_at", "")):
-            latest_by_name[key] = item
-
-    reconciled = list(latest_by_name.values())
-    changed = reconciled != original_items
-    if changed:
-        database["table_files"] = reconciled
-        save_database(database)
-    return changed
 
 
 def resolve_table_path(file_info: dict[str, Any]) -> Path:
@@ -1618,41 +1525,75 @@ def _resolve_structured_column(dataframe: Any, requested_field: str) -> str | No
     return None
 
 
+def _normalize_person_text(value: Any) -> str:
+    """Chuẩn hóa tên nhưng GIỮ dấu tiếng Việt để không nhầm Dung/Dũng."""
+    text = unicodedata.normalize("NFC", str(value or "")).casefold()
+    text = re.sub(r"[^0-9a-zà-ỹđ\s]", " ", text)
+    return " ".join(text.split())
+
+
+def _strip_person_honorifics(text: str) -> str:
+    """Bỏ cách xưng hô, không bỏ các thành phần họ tên."""
+    honorifics = {
+        "ông", "bà", "anh", "chị", "cô", "chú", "bác", "em",
+        "đồng chí", "ông ấy", "bà ấy",
+    }
+    normalized = _normalize_person_text(text)
+    for phrase in sorted(honorifics, key=len, reverse=True):
+        normalized = re.sub(
+            rf"(^|\s){re.escape(phrase)}(?=\s|$)", " ", normalized
+        )
+    return " ".join(normalized.split())
+
+
 def _person_match_score(question: str, person_name: Any) -> int:
-    """Chấm điểm tên người trong câu hỏi; ưu tiên khớp đủ họ tên, sau đó khớp cụm tên."""
-    normalized_question = normalize_table_text(question)
-    normalized_name = normalize_table_text(person_name)
-    if not normalized_name:
+    """
+    So khớp tên theo nguyên tắc an toàn:
+    - Giữ dấu tiếng Việt: Dung khác Dũng.
+    - Họ tên đầy đủ/cụm từ 2 tiếng được ưu tiên.
+    - Một tiếng cuối chỉ khớp khi đúng dấu; nếu nhiều người cùng tên,
+      lookup_structured_table sẽ yêu cầu làm rõ, không tự chọn.
+    - Chỉ cho phép so khớp không dấu khi người dùng nhập ít nhất 2 tiếng tên.
+    """
+    question_with_accents = _strip_person_honorifics(question)
+    name_with_accents = _normalize_person_text(person_name)
+    if not name_with_accents:
         return 0
 
-    if normalized_name in normalized_question:
-        return 1000 + len(normalized_name)
+    if name_with_accents in question_with_accents:
+        return 3000 + len(name_with_accents)
 
-    name_tokens = [token for token in normalized_name.split() if len(token) >= 2]
-    question_tokens = set(normalized_question.split())
+    name_tokens = [token for token in name_with_accents.split() if len(token) >= 2]
+    question_tokens = set(question_with_accents.split())
     if not name_tokens:
         return 0
 
-    matched_tokens = [token for token in name_tokens if token in question_tokens]
-    if not matched_tokens:
-        return 0
+    exact_tokens = [token for token in name_tokens if token in question_tokens]
 
-    # Cho phép gọi bằng tên cuối (ví dụ “chị Dung”) với điểm thấp.
-    # Nếu có nhiều người cùng tên, phần xử lý phía dưới sẽ yêu cầu người dùng làm rõ,
-    # tuyệt đối không tự chọn một người.
-    single_last_name_bonus = 0
-    if len(name_tokens) >= 3 and len(matched_tokens) < 2:
-        if name_tokens[-1] in question_tokens:
-            single_last_name_bonus = 25
-        else:
-            return 0
+    # Khớp chính xác từ 2 thành phần tên trở lên, vẫn giữ dấu.
+    if len(exact_tokens) >= 2:
+        tail_two = " ".join(name_tokens[-2:])
+        tail_bonus = 500 if tail_two in question_with_accents else 0
+        coverage = int(200 * len(exact_tokens) / len(name_tokens))
+        return 1200 + coverage + tail_bonus + len(exact_tokens) * 20
 
-    # Cụm tên cuối thường là cách người dùng gọi tắt, ví dụ “Đoan Dung”.
-    tail_two = " ".join(name_tokens[-2:]) if len(name_tokens) >= 2 else name_tokens[-1]
-    tail_bonus = 200 if tail_two and tail_two in normalized_question else 0
-    coverage = int(100 * len(matched_tokens) / len(name_tokens))
-    return coverage + tail_bonus + len(matched_tokens) * 10 + single_last_name_bonus
+    # Chỉ một tiếng: bắt buộc là tiếng cuối và phải đúng dấu tuyệt đối.
+    if len(exact_tokens) == 1 and exact_tokens[0] == name_tokens[-1]:
+        return 300
 
+    # Hỗ trợ câu hỏi không dấu, nhưng phải có ít nhất 2 tiếng tên để an toàn.
+    accentless_question = normalize_table_text(question)
+    accentless_name = normalize_table_text(person_name)
+    accentless_name_tokens = [t for t in accentless_name.split() if len(t) >= 2]
+    accentless_question_tokens = set(accentless_question.split())
+    accentless_matches = [
+        t for t in accentless_name_tokens if t in accentless_question_tokens
+    ]
+    if len(accentless_matches) >= 2:
+        coverage = int(100 * len(accentless_matches) / len(accentless_name_tokens))
+        return 700 + coverage + len(accentless_matches) * 10
+
+    return 0
 
 def lookup_structured_table(
     database: dict[str, Any],
@@ -1711,25 +1652,11 @@ def lookup_structured_table(
             "CCCD", "Số sổ BHXH", "Số thẻ BHYT", "Số điện thoại"
         }
         if requested_field in sensitive_fields and database.get("table_files"):
-            inspected: list[str] = []
-            for file_info in database.get("table_files", []):
-                file_name = str(file_info.get("name", "Bảng dữ liệu"))
-                stats = file_info.get("sheet_stats", {}) or {}
-                if stats:
-                    details = ", ".join(
-                        f"{sheet}: {int(info.get('rows', 0))} dòng"
-                        for sheet, info in stats.items()
-                    )
-                    inspected.append(f"- {file_name} — {details}")
-                else:
-                    inspected.append(f"- {file_name}")
-            inspected_text = "\n".join(inspected[:8])
             return (
                 f"Chưa tìm thấy **{requested_field}** tương ứng trong kho bảng dữ liệu.\n\n"
-                f"**Bảng đã kiểm tra:**\n{inspected_text}\n\n"
-                "**Khuyến cáo kiểm tra:** Nếu bảng bên trái hiển thị 0 dòng hoặc sai tên sheet, "
-                "hãy xóa bản cũ và nạp lại file Excel. Hệ thống không suy đoán từ PDF "
-                "đối với trường thông tin nhạy cảm này."
+                "**Khuyến cáo kiểm tra:** Mở mục *Kho bảng dữ liệu*, chọn đúng "
+                "file/sheet và kiểm tra tên người, tên cột. Hệ thống không chuyển "
+                "sang suy đoán từ PDF đối với trường thông tin nhạy cảm này."
             )
         return None
 
