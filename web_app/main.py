@@ -2833,59 +2833,95 @@ with st.sidebar:
 
     st.markdown("##### Trò chuyện gần đây")
 
-    conversations = sorted(
-        [
-            item
-            for item in database["conversations"].values()
-            if item.get("messages")
-        ],
-        key=lambda item: item.get("updated_at", ""),
+    # Hiển thị từng câu hỏi gần đây thành một mục riêng, giống danh sách
+    # lịch sử của ChatGPT. Một cuộc trò chuyện có nhiều câu hỏi thì các
+    # câu hỏi liền trước sẽ tiếp tục nằm xuống phía dưới, thay vì chỉ còn
+    # một dòng tiêu đề đại diện cho cả cuộc trò chuyện.
+    recent_questions: list[dict[str, Any]] = []
+    for conversation_item in database["conversations"].values():
+        messages = conversation_item.get("messages", [])
+        for message_index, old_message in enumerate(messages):
+            if old_message.get("role") != "user":
+                continue
+
+            question_text = " ".join(
+                str(old_message.get("content", "")).split()
+            ).strip()
+            if not question_text:
+                continue
+
+            recent_questions.append(
+                {
+                    "conversation_id": conversation_item["id"],
+                    "message_index": message_index,
+                    "question": question_text,
+                    "updated_at": old_message.get(
+                        "created_at",
+                        conversation_item.get("updated_at", ""),
+                    ),
+                }
+            )
+
+    recent_questions.sort(
+        key=lambda item: (item.get("updated_at", ""), item["message_index"]),
         reverse=True,
-    )[:15]
+    )
+    recent_questions = recent_questions[:20]
 
-    for item in conversations:
-        selected = item["id"] == database["active_id"]
+    for history_item in recent_questions:
+        conversation_id = history_item["conversation_id"]
+        selected = conversation_id == database.get("active_id")
+        question_label = history_item["question"]
+        if len(question_label) > 46:
+            question_label = question_label[:45].rstrip() + "…"
+
         col_open, col_delete = st.columns([5.8, 1])
-
-        # Lấy một đoạn nội dung trả lời gần nhất để người dùng dễ nhận biết
-        # cuộc trò chuyện cũ, thay vì chỉ nhìn thấy một dòng tiêu đề.
-        latest_answer = ""
-        for old_message in reversed(item.get("messages", [])):
-            if old_message.get("role") == "assistant":
-                latest_answer = " ".join(str(old_message.get("content", "")).split())
-                break
-
-        if len(latest_answer) > 96:
-            latest_answer = latest_answer[:95].rstrip() + "…"
-
         with col_open:
             if st.button(
-                item["title"],
-                key=f"open_{item['id']}",
+                question_label,
+                key=(
+                    f"open_question_{conversation_id}_"
+                    f"{history_item['message_index']}"
+                ),
                 use_container_width=True,
                 type="primary" if selected else "secondary",
+                help=history_item["question"],
             ):
-                database["active_id"] = item["id"]
+                database["active_id"] = conversation_id
                 save_database(database)
+                st.session_state["history_focus_message_index"] = (
+                    history_item["message_index"]
+                )
                 st.rerun()
-
-            if latest_answer:
-                st.caption(latest_answer)
 
         with col_delete:
-            if st.button(
-                "🗑️",
-                key=f"delete_{item['id']}",
-                help="Xóa cuộc trò chuyện này",
-                use_container_width=True,
-            ):
-                database["conversations"].pop(item["id"], None)
-
-                if database.get("active_id") == item["id"]:
-                    database["active_id"] = None
-
-                save_database(database)
-                st.rerun()
+            # Chỉ hiện nút xóa ở câu hỏi mới nhất của từng cuộc trò chuyện,
+            # tránh lặp nhiều nút thùng rác cho cùng một đoạn chat.
+            conversation_messages = database["conversations"][
+                conversation_id
+            ].get("messages", [])
+            latest_user_index = max(
+                (
+                    index
+                    for index, message in enumerate(conversation_messages)
+                    if message.get("role") == "user"
+                ),
+                default=-1,
+            )
+            if history_item["message_index"] == latest_user_index:
+                if st.button(
+                    "🗑️",
+                    key=f"delete_{conversation_id}",
+                    help="Xóa toàn bộ cuộc trò chuyện này",
+                    use_container_width=True,
+                ):
+                    database["conversations"].pop(conversation_id, None)
+                    if database.get("active_id") == conversation_id:
+                        database["active_id"] = None
+                    save_database(database)
+                    st.rerun()
+            else:
+                st.write("")
 
     st.divider()
     st.markdown("##### Chế độ trả lời")
