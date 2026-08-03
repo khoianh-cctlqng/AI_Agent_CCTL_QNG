@@ -1013,6 +1013,126 @@ def now_text() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def is_temporary_repository_filename(file_name: str) -> bool:
+    """Nhận diện tên file tạm/rác không phải tên tài liệu người dùng tải lên."""
+    name = Path(str(file_name or "")).name.strip().casefold()
+    if not name:
+        return True
+
+    temporary_patterns = (
+        r"^tmp(?:[_-]?\d+)?[_-].+",
+        r"^tmp[0-9a-z_-]{3,}",
+        r"^temp(?:orary)?[_-].+",
+        r"^~\$",
+        r"^unnamed(?:[_-]|\.)",
+        r"^document(?:[_-]?\d+)?\.(?:doc|docx|pdf|txt)$",
+    )
+    return any(re.search(pattern, name, flags=re.IGNORECASE) for pattern in temporary_patterns)
+
+
+def sanitize_uploaded_file_registry(database: dict[str, Any]) -> bool:
+    """Loại mục tên tạm và bản ghi trùng khỏi danh mục tài liệu cục bộ."""
+    original_items = list(database.get("uploaded_files", []))
+    clean_items: list[dict[str, Any]] = []
+    seen_file_ids: set[str] = set()
+
+    for item in original_items:
+        file_id = str(item.get("openai_file_id", "")).strip()
+        file_name = str(item.get("name", "")).strip()
+        if not file_id or is_temporary_repository_filename(file_name):
+            continue
+        if file_id in seen_file_ids:
+            continue
+        seen_file_ids.add(file_id)
+        clean_items.append(item)
+
+    changed = clean_items != original_items
+    database["uploaded_files"] = clean_items
+    return changed
+
+
+def cleanup_vector_store_temporary_files(
+    client: OpenAI,
+    database: dict[str, Any],
+) -> dict[str, Any]:
+    """Xóa vĩnh viễn các file tên tạm khỏi Vector Store và kho Files OpenAI."""
+    vector_store_id = ensure_vector_store(client, database)
+    removed: list[str] = []
+    errors: list[str] = []
+    after: str | None = None
+
+    while True:
+        kwargs: dict[str, Any] = {
+            "vector_store_id": vector_store_id,
+            "limit": 100,
+        }
+        if after:
+            kwargs["after"] = after
+
+        page = client.vector_stores.files.list(**kwargs)
+        page_items = list(getattr(page, "data", []) or [])
+
+        for vector_file in page_items:
+            file_id = str(getattr(vector_file, "id", "") or "").strip()
+            if not file_id:
+                continue
+
+            try:
+                file_object = client.files.retrieve(file_id)
+                remote_name = str(
+                    getattr(file_object, "filename", "") or ""
+                ).strip()
+            except Exception as error:
+                errors.append(f"{file_id}: không đọc được tên ({error})")
+                continue
+
+            # Nếu ID đã có tên gốc hợp lệ trong registry thì giữ lại.
+            registered_name = next(
+                (
+                    str(item.get("name", "")).strip()
+                    for item in database.get("uploaded_files", [])
+                    if str(item.get("openai_file_id", "")).strip() == file_id
+                ),
+                "",
+            )
+            effective_name = registered_name or remote_name
+            if not is_temporary_repository_filename(effective_name):
+                continue
+
+            try:
+                client.vector_stores.files.delete(
+                    vector_store_id=vector_store_id,
+                    file_id=file_id,
+                )
+                try:
+                    client.files.delete(file_id)
+                except Exception:
+                    pass
+                removed.append(effective_name or remote_name or file_id)
+            except Exception as error:
+                errors.append(f"{effective_name or file_id}: {error}")
+
+        if not bool(getattr(page, "has_more", False)) or not page_items:
+            break
+        after = str(getattr(page, "last_id", "") or "").strip()
+        if not after:
+            break
+
+    removed_ids = {
+        str(item.get("openai_file_id", "")).strip()
+        for item in database.get("uploaded_files", [])
+        if is_temporary_repository_filename(str(item.get("name", "")))
+    }
+    database["uploaded_files"] = [
+        item
+        for item in database.get("uploaded_files", [])
+        if str(item.get("openai_file_id", "")).strip() not in removed_ids
+        and not is_temporary_repository_filename(str(item.get("name", "")))
+    ]
+    save_database(database)
+    return {"removed": removed, "errors": errors}
+
+
 def new_database() -> dict[str, Any]:
     return {
         "active_id": None,
@@ -1055,6 +1175,9 @@ def load_database() -> dict[str, Any]:
     configured_vector_store_id = get_configured_vector_store_id()
     if configured_vector_store_id:
         database["vector_store_id"] = configured_vector_store_id
+
+    if sanitize_uploaded_file_registry(database):
+        save_database(database)
 
     return database
 
@@ -2434,10 +2557,15 @@ def search_vector_store_context(
                 getattr(result, "filename", "")
                 or "Tài liệu không rõ tên"
             )
-            filename = (
-                (filename_map or {}).get(file_id)
-                or raw_filename
-            )
+            mapped_filename = (filename_map or {}).get(file_id, "")
+            filename = mapped_filename or raw_filename
+            # Không đưa file tên tạm/rác vào ngữ cảnh hoặc danh sách nguồn.
+            # Nếu file có ánh xạ sang tên gốc hợp lệ thì vẫn được sử dụng.
+            if (
+                not mapped_filename
+                and is_temporary_repository_filename(raw_filename)
+            ):
+                continue
             score = float(getattr(result, "score", 0.0) or 0.0)
 
             parts: list[str] = []
@@ -2844,7 +2972,11 @@ YÊU CẦU KẾT HỢP HAI KHO DỮ LIỆU:
         # xuất hiện trong tài liệu. Vì vậy không cho phép trả số nhạy cảm từ PDF.
         all_sources: list[str] = []
         for name in source_files + full_document_files:
-            if name and name not in all_sources:
+            if (
+                name
+                and not is_temporary_repository_filename(name)
+                and name not in all_sources
+            ):
                 all_sources.append(name)
 
         has_pdf_source = any(
@@ -2898,7 +3030,11 @@ YÊU CẦU KẾT HỢP HAI KHO DỮ LIỆU:
 
             all_sources: list[str] = []
             for name in source_files + full_document_files:
-                if name not in all_sources:
+                if (
+                    name
+                    and not is_temporary_repository_filename(name)
+                    and name not in all_sources
+                ):
                     all_sources.append(name)
 
             source_text = ", ".join(all_sources)
@@ -3342,6 +3478,41 @@ with st.sidebar:
                             None,
                         )
                         st.rerun()
+
+    st.markdown("###### Làm sạch kho trước khi sử dụng chính thức")
+    st.caption(
+        "Xóa các file tên tạm như tmp..., temp... còn sót trong Vector Store. "
+        "Các file có tên gốc do anh/chị tải lên được giữ nguyên."
+    )
+
+    if st.button(
+        "🧹 Làm sạch file tạm trong kho",
+        key="cleanup_temporary_repository_files",
+        use_container_width=True,
+    ):
+        try:
+            client = get_client()
+            with st.spinner("Đang rà soát và xóa file tạm..."):
+                cleanup_result = cleanup_vector_store_temporary_files(
+                    client,
+                    database,
+                )
+            removed = cleanup_result.get("removed", [])
+            errors = cleanup_result.get("errors", [])
+            if removed:
+                st.success(
+                    "Đã xóa file tạm: " + ", ".join(removed)
+                )
+            else:
+                st.success("Kho không còn file tạm cần xóa.")
+            if errors:
+                st.warning(
+                    "Một số mục chưa làm sạch được: "
+                    + " | ".join(errors[:3])
+                )
+            st.rerun()
+        except Exception as error:
+            st.error(f"Không thể làm sạch kho: {error}")
 
 
     st.divider()
