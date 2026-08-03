@@ -1246,7 +1246,9 @@ def clean_table_dataframe(dataframe: Any) -> Any:
                     score += 1
             # Ưu tiên dòng có nhiều ô tiêu đề khác nhau.
             score += min(len({v for v in values if v}), 12) // 4
-            if score > best_score:
+            # Nếu điểm bằng nhau, ưu tiên dòng thấp hơn vì đó thường là
+            # tầng tiêu đề chi tiết cuối cùng ngay trước dữ liệu.
+            if score >= best_score:
                 best_score = score
                 header_index = position
 
@@ -1271,16 +1273,19 @@ def clean_table_dataframe(dataframe: Any) -> Any:
             ])
             header_rows = header_rows[-3:]
 
-            # Điền ngang ô gộp cho từng tầng.
+            # Điền ngang chỉ cho các tầng nhóm phía trên. Không điền ngang
+            # tầng cuối vì ô trống ở tầng chi tiết có ý nghĩa riêng; điền ngang
+            # tầng cuối sẽ làm lệch tên cột và ghép nhầm thông số.
             filled_rows: list[list[str]] = []
-            for row in header_rows:
+            for row_index, row in enumerate(header_rows):
                 filled = row[:]
-                last = ""
-                for idx, value in enumerate(filled):
-                    if value:
-                        last = value
-                    elif last:
-                        filled[idx] = last
+                if row_index < len(header_rows) - 1:
+                    last = ""
+                    for idx, value in enumerate(filled):
+                        if value:
+                            last = value
+                        elif last:
+                            filled[idx] = last
                 filled_rows.append(filled)
 
             normalized_columns: list[str] = []
@@ -1382,18 +1387,50 @@ def read_table_file(file_path: Path) -> dict[str, Any]:
         raise RuntimeError(f"Không đọc được CSV: {last_error}")
 
     if file_path.suffix.lower() == ".xlsx":
-        sheets = pd.read_excel(
-            file_path,
-            sheet_name=None,
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-            engine="openpyxl",
-        )
-        return {
-            str(name): clean_table_dataframe(frame)
-            for name, frame in sheets.items()
-        }
+        # Đọc trực tiếp bằng openpyxl và bung giá trị của các ô gộp ra toàn
+        # bộ vùng gộp. Đây là bước bắt buộc với biểu mẫu thủy lợi có tiêu đề
+        # 2-3 tầng; pandas mặc định chỉ giữ giá trị ở ô góc trên bên trái,
+        # làm mất tên nhóm cột và khiến Agent ghép sai thông số.
+        try:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(file_path, data_only=True, read_only=False)
+            parsed_sheets: dict[str, Any] = {}
+            for worksheet in workbook.worksheets:
+                max_row = int(worksheet.max_row or 0)
+                max_column = int(worksheet.max_column or 0)
+                rows = [
+                    [worksheet.cell(row=row, column=column).value or ""
+                     for column in range(1, max_column + 1)]
+                    for row in range(1, max_row + 1)
+                ]
+
+                # Sao chép giá trị ô góc trên trái cho mọi ô thuộc vùng gộp.
+                for merged_range in worksheet.merged_cells.ranges:
+                    min_col, min_row, max_col, max_row_range = merged_range.bounds
+                    merged_value = worksheet.cell(min_row, min_col).value or ""
+                    for row in range(min_row, max_row_range + 1):
+                        for column in range(min_col, max_col + 1):
+                            rows[row - 1][column - 1] = merged_value
+
+                raw_frame = pd.DataFrame(rows)
+                parsed_sheets[str(worksheet.title)] = clean_table_dataframe(raw_frame)
+            workbook.close()
+            return parsed_sheets
+        except Exception:
+            # Dự phòng cho file Excel thông thường không có cấu trúc ô gộp.
+            sheets = pd.read_excel(
+                file_path,
+                sheet_name=None,
+                header=None,
+                dtype=str,
+                keep_default_na=False,
+                engine="openpyxl",
+            )
+            return {
+                str(name): clean_table_dataframe(frame)
+                for name, frame in sheets.items()
+            }
 
     raise RuntimeError("Chỉ nhận file .xlsx hoặc .csv.")
 
@@ -1623,10 +1660,28 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
 
     if not records:
         type_text = ", ".join(requested_types).lower()
+        loaded_sources: list[str] = []
+        for file_info in database.get("table_files", []):
+            file_path = resolve_table_path(file_info)
+            if not file_path.exists():
+                continue
+            try:
+                sheets = read_table_file(file_path)
+            except Exception:
+                continue
+            for sheet_name, dataframe in sheets.items():
+                columns = ", ".join(str(column) for column in list(dataframe.columns)[:8])
+                loaded_sources.append(
+                    f"- `{file_info.get('name', file_path.name)}` — sheet `{sheet_name}` "
+                    f"({len(dataframe)} dòng; cột: {columns or 'chưa nhận diện'})"
+                )
+        diagnostic = "\n".join(loaded_sources[:8])
         return (
             f"Chưa tìm thấy dữ liệu **{type_text}** trong kho bảng dữ liệu.\n\n"
-            "**Khuyến cáo kiểm tra:** Chọn đúng file/sheet và kiểm tra bảng có cột "
-            "`Tên công trình` hoặc tên sheet thể hiện loại công trình."
+            "**Chẩn đoán bảng đã đọc:**\n"
+            f"{diagnostic or '- Chưa đọc được sheet dữ liệu nào.'}\n\n"
+            "**Khuyến cáo kiểm tra:** Xóa bản bảng cũ, nạp lại file sau khi "
+            "ứng dụng cập nhật để hệ thống đọc lại toàn bộ ô gộp và tiêu đề nhiều tầng."
         )
 
     # Loại trùng cùng tên, cùng loại trong cùng nguồn.
