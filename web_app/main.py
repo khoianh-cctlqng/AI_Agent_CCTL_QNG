@@ -24,6 +24,13 @@ except ImportError:
     PANDAS_AVAILABLE = False
 
 try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    load_workbook = None
+    OPENPYXL_AVAILABLE = False
+
+try:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Inches, Pt
@@ -1049,6 +1056,7 @@ def load_database() -> dict[str, Any]:
     if configured_vector_store_id:
         database["vector_store_id"] = configured_vector_store_id
 
+    reconcile_table_files(database)
     return database
 
 
@@ -1342,6 +1350,50 @@ def clean_table_dataframe(dataframe: Any) -> Any:
     return dataframe.reset_index(drop=True)
 
 
+def _read_xlsx_with_merged_cells(file_path: Path) -> dict[str, Any]:
+    """Đọc đúng workbook Excel và trải giá trị ô gộp ra toàn vùng gộp.
+
+    Cách này đặc biệt cần cho các biểu mẫu hành chính có tiêu đề hai tầng,
+    vì pandas đọc trực tiếp thường để trống các ô thuộc vùng merge và dễ làm
+    sai tên cột hoặc nhận nhầm sheet cũ.
+    """
+    if not OPENPYXL_AVAILABLE or load_workbook is None:
+        raise RuntimeError("Chưa cài openpyxl.")
+
+    workbook = load_workbook(
+        filename=file_path,
+        data_only=True,
+        read_only=False,
+    )
+    result: dict[str, Any] = {}
+
+    for worksheet in workbook.worksheets:
+        max_row = int(worksheet.max_row or 0)
+        max_column = int(worksheet.max_column or 0)
+        if max_row <= 0 or max_column <= 0:
+            result[str(worksheet.title)] = pd.DataFrame()
+            continue
+
+        rows = [
+            [worksheet.cell(row=row, column=column).value for column in range(1, max_column + 1)]
+            for row in range(1, max_row + 1)
+        ]
+
+        # Trải nội dung ô trên-trái ra toàn bộ vùng gộp để giữ đúng nhóm tiêu đề.
+        for merged_range in worksheet.merged_cells.ranges:
+            min_col, min_row, max_col, max_row_range = merged_range.bounds
+            value = rows[min_row - 1][min_col - 1]
+            for row in range(min_row, max_row_range + 1):
+                for column in range(min_col, max_col + 1):
+                    rows[row - 1][column - 1] = value
+
+        raw_dataframe = pd.DataFrame(rows)
+        result[str(worksheet.title)] = clean_table_dataframe(raw_dataframe)
+
+    workbook.close()
+    return result
+
+
 def read_table_file(file_path: Path) -> dict[str, Any]:
     if not PANDAS_AVAILABLE:
         raise RuntimeError("Chưa cài pandas/openpyxl.")
@@ -1362,21 +1414,31 @@ def read_table_file(file_path: Path) -> dict[str, Any]:
         raise RuntimeError(f"Không đọc được CSV: {last_error}")
 
     if file_path.suffix.lower() == ".xlsx":
-        sheets = pd.read_excel(
-            file_path,
-            sheet_name=None,
-            header=None,
-            dtype=str,
-            keep_default_na=False,
-            engine="openpyxl",
-        )
-        return {
-            str(name): clean_table_dataframe(frame)
-            for name, frame in sheets.items()
-        }
+        # Ưu tiên openpyxl để lấy đúng tên sheet thật và cấu trúc ô gộp.
+        try:
+            return _read_xlsx_with_merged_cells(file_path)
+        except Exception as openpyxl_error:
+            # Phương án dự phòng cho các workbook đặc biệt.
+            try:
+                sheets = pd.read_excel(
+                    file_path,
+                    sheet_name=None,
+                    header=None,
+                    dtype=str,
+                    keep_default_na=False,
+                    engine="openpyxl",
+                )
+                return {
+                    str(name): clean_table_dataframe(frame)
+                    for name, frame in sheets.items()
+                }
+            except Exception as pandas_error:
+                raise RuntimeError(
+                    "Không đọc được file Excel. "
+                    f"openpyxl: {openpyxl_error}; pandas: {pandas_error}"
+                ) from pandas_error
 
     raise RuntimeError("Chỉ nhận file .xlsx hoặc .csv.")
-
 
 def save_table_file(
     database: dict[str, Any],
@@ -1437,10 +1499,41 @@ def save_table_file(
         "uploaded_at": now_text(),
         "sheet_names": list(sheets.keys()),
         "sheet_stats": sheet_stats,
+        "file_size": int(stored_path.stat().st_size),
     }
     database.setdefault("table_files", []).append(metadata)
     save_database(database)
     return metadata
+
+
+def reconcile_table_files(database: dict[str, Any]) -> bool:
+    """Dọn metadata bảng cũ/mất file và chỉ giữ bản mới nhất của mỗi tên file."""
+    original_items = list(database.get("table_files", []) or [])
+    valid_items: list[dict[str, Any]] = []
+
+    for item in original_items:
+        stored_name = str(item.get("stored_name", "")).strip()
+        if not stored_name:
+            continue
+        path = TABLE_DATA_DIR / stored_name
+        if not path.exists() or not path.is_file():
+            continue
+        valid_items.append(item)
+
+    # Bản mới nhất thắng nếu trước đây cùng tên file đã nạp nhiều lần.
+    latest_by_name: dict[str, dict[str, Any]] = {}
+    for item in valid_items:
+        key = str(item.get("name", "")).strip().casefold()
+        current = latest_by_name.get(key)
+        if current is None or str(item.get("uploaded_at", "")) >= str(current.get("uploaded_at", "")):
+            latest_by_name[key] = item
+
+    reconciled = list(latest_by_name.values())
+    changed = reconciled != original_items
+    if changed:
+        database["table_files"] = reconciled
+        save_database(database)
+    return changed
 
 
 def resolve_table_path(file_info: dict[str, Any]) -> Path:
@@ -1618,11 +1711,25 @@ def lookup_structured_table(
             "CCCD", "Số sổ BHXH", "Số thẻ BHYT", "Số điện thoại"
         }
         if requested_field in sensitive_fields and database.get("table_files"):
+            inspected: list[str] = []
+            for file_info in database.get("table_files", []):
+                file_name = str(file_info.get("name", "Bảng dữ liệu"))
+                stats = file_info.get("sheet_stats", {}) or {}
+                if stats:
+                    details = ", ".join(
+                        f"{sheet}: {int(info.get('rows', 0))} dòng"
+                        for sheet, info in stats.items()
+                    )
+                    inspected.append(f"- {file_name} — {details}")
+                else:
+                    inspected.append(f"- {file_name}")
+            inspected_text = "\n".join(inspected[:8])
             return (
                 f"Chưa tìm thấy **{requested_field}** tương ứng trong kho bảng dữ liệu.\n\n"
-                "**Khuyến cáo kiểm tra:** Mở mục *Kho bảng dữ liệu*, chọn đúng "
-                "file/sheet và kiểm tra tên người, tên cột. Hệ thống không chuyển "
-                "sang suy đoán từ PDF đối với trường thông tin nhạy cảm này."
+                f"**Bảng đã kiểm tra:**\n{inspected_text}\n\n"
+                "**Khuyến cáo kiểm tra:** Nếu bảng bên trái hiển thị 0 dòng hoặc sai tên sheet, "
+                "hãy xóa bản cũ và nạp lại file Excel. Hệ thống không suy đoán từ PDF "
+                "đối với trường thông tin nhạy cảm này."
             )
         return None
 
