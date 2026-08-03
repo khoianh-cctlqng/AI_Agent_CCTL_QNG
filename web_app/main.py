@@ -3302,25 +3302,11 @@ else:
                 st.markdown(message["content"])
 
 # Điều khiển vị trí cuộn:
-# - Có hội thoại: cuộn xuống tin nhắn mới nhất.
+# - Không tự cuộn xuống sát đáy vì ô chat cố định có thể che câu hỏi mới.
+# - Sau khi người dùng gửi câu hỏi, mã bên dưới sẽ đưa chính câu hỏi đó
+#   vào vùng giữa màn hình.
 # - Chưa có hội thoại: luôn đưa màn hình về logo ở đầu trang.
-if conversation["messages"]:
-    st.markdown('<div id="chat-bottom-anchor"></div>', unsafe_allow_html=True)
-
-    components.html(
-        """
-        <script>
-        setTimeout(() => {
-            const anchor = window.parent.document.getElementById("chat-bottom-anchor");
-            if (anchor) {
-                anchor.scrollIntoView({ behavior: "auto", block: "end" });
-            }
-        }, 80);
-        </script>
-        """,
-        height=0,
-    )
-else:
+if not conversation["messages"]:
     components.html(
         """
         <script>
@@ -3372,6 +3358,46 @@ else:
         window.parent.addEventListener("pageshow", forceWelcomeTop, {
             once: true
         });
+        </script>
+        """,
+        height=0,
+    )
+
+
+def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
+    """Đưa câu hỏi vừa gửi vào vùng giữa màn hình, tránh bị ô chat che."""
+    components.html(
+        f"""
+        <script>
+        const focusCurrentQuestion = () => {{
+            const parentDoc = window.parent.document;
+            const anchor = parentDoc.getElementById({anchor_id!r});
+            if (!anchor) return;
+
+            // Tính vị trí theo vùng cuộn chính của Streamlit thay vì cuộn sát đáy.
+            const main = parentDoc.querySelector(
+                '[data-testid="stMain"], section.main, .main'
+            );
+            const rect = anchor.getBoundingClientRect();
+            const viewportHeight = window.parent.innerHeight || 800;
+            const desiredTop = Math.max(90, viewportHeight * 0.34);
+            const delta = rect.top - desiredTop;
+
+            if (main && typeof main.scrollBy === "function") {{
+                main.scrollBy({{ top: delta, left: 0, behavior: "auto" }});
+            }} else {{
+                window.parent.scrollBy({{
+                    top: delta,
+                    left: 0,
+                    behavior: "auto"
+                }});
+            }}
+        }};
+
+        // Chạy nhiều lần vì nội dung trả lời/spinner có thể làm thay đổi chiều cao trang.
+        [40, 160, 420, 900].forEach((delay) => {{
+            setTimeout(focusCurrentQuestion, delay);
+        }});
         </script>
         """,
         height=0,
@@ -3469,8 +3495,16 @@ if question:
 
     append_message(database, conversation_id, "user", displayed_question)
 
+    # Neo vị trí ngay trước câu hỏi hiện hành và đưa câu hỏi vào giữa màn hình.
+    # scroll-margin tạo khoảng an toàn để ô chat cố định không che nội dung.
+    st.markdown(
+        '<div id="current-question-anchor" '
+        'style="height:1px; scroll-margin-top:180px; scroll-margin-bottom:260px;"></div>',
+        unsafe_allow_html=True,
+    )
     with st.chat_message("user", avatar="👤"):
         st.markdown(displayed_question)
+    focus_current_question()
 
     structured_table_answer = lookup_structured_table(
         database,
