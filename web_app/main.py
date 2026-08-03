@@ -1435,6 +1435,30 @@ def read_table_file(file_path: Path) -> dict[str, Any]:
     raise RuntimeError("Chỉ nhận file .xlsx hoặc .csv.")
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
+def _read_table_file_cached(
+    path_text: str,
+    modified_ns: int,
+    file_size: int,
+) -> dict[str, Any]:
+    """Đọc bảng một lần và tái sử dụng cho các câu hỏi tiếp theo.
+
+    modified_ns và file_size là khóa cache để tự động đọc lại khi file thay đổi.
+    """
+    del modified_ns, file_size
+    return read_table_file(Path(path_text))
+
+
+def read_table_file_fast(file_path: Path) -> dict[str, Any]:
+    """Phiên bản đọc nhanh dùng cache, nhưng vẫn tự làm mới khi file đổi."""
+    stat = file_path.stat()
+    return _read_table_file_cached(
+        str(file_path.resolve()),
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+    )
+
+
 def save_table_file(
     database: dict[str, Any],
     uploaded_file: Any,
@@ -1452,7 +1476,7 @@ def save_table_file(
     stored_path = TABLE_DATA_DIR / stored_name
     stored_path.write_bytes(uploaded_file.getbuffer())
 
-    sheets = read_table_file(stored_path)
+    sheets = read_table_file_fast(stored_path)
     sheet_stats = {
         str(name): {
             "rows": int(len(frame)),
@@ -1616,7 +1640,7 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
         if not file_path.exists():
             continue
         try:
-            sheets = read_table_file(file_path)
+            sheets = read_table_file_fast(file_path)
         except Exception:
             continue
 
@@ -1666,7 +1690,7 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
             if not file_path.exists():
                 continue
             try:
-                sheets = read_table_file(file_path)
+                sheets = read_table_file_fast(file_path)
             except Exception:
                 continue
             for sheet_name, dataframe in sheets.items():
@@ -1957,7 +1981,7 @@ def lookup_structured_table(
             continue
 
         try:
-            sheets = read_table_file(file_path)
+            sheets = read_table_file_fast(file_path)
         except Exception:
             continue
 
