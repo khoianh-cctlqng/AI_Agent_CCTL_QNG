@@ -3814,156 +3814,155 @@ with st.sidebar:
                         delete_table_file(database, selected_id)
                         st.rerun()
 
-                with st.expander("🔎 Chẩn đoán kho dữ liệu dạng bảng", expanded=False):
+            with st.expander("🔎 Chẩn đoán kho dữ liệu dạng bảng", expanded=False):
+                total_sheets = 0
+                total_rows = 0
+                total_columns = 0
+                missing_paths: list[str] = []
+                for item in table_files:
+                    item_path = resolve_table_path(item)
+                    if not item_path.exists():
+                        missing_paths.append(str(item.get("name", "Không rõ tên")))
+                        continue
+                    try:
+                        item_sheets = read_table_file_fast(item_path)
+                        total_sheets += len(item_sheets)
+                        total_rows += sum(len(frame) for frame in item_sheets.values())
+                        total_columns += sum(len(frame.columns) for frame in item_sheets.values())
+                    except Exception as error:
+                        missing_paths.append(
+                            f"{item.get('name', 'Không rõ tên')}: {error}"
+                        )
+                st.caption(
+                    f"Tệp: {len(table_files)} | Sheet: {total_sheets} | "
+                    f"Tổng dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}"
+                )
+                if missing_paths:
+                    st.warning(
+                        "Có tệp cần kiểm tra: " + " | ".join(missing_paths[:5])
+                    )
+                else:
+                    st.success("Các tệp bảng đang truy cập được.")
+
+            with st.expander("🛠️ Bảo trì kho dữ liệu dạng bảng", expanded=False):
+                st.caption(
+                    "Làm sạch tệp lỗi, đọc lại tiêu đề nhiều tầng, kiểm tra trùng lặp và thống kê dữ liệu."
+                )
+
+                if st.button(
+                    "🧹 Làm sạch bảng lỗi hoặc bị mất",
+                    key="clean_missing_structured_tables",
+                    use_container_width=True,
+                ):
+                    before = len(database.get("table_files", []))
+                    database["table_files"] = [
+                        item for item in database.get("table_files", [])
+                        if resolve_table_path(item).exists()
+                    ]
+                    save_database(database)
+                    removed_count = before - len(database.get("table_files", []))
+                    st.success(f"Đã loại {removed_count} mục bảng lỗi hoặc không còn tệp gốc.")
+                    st.rerun()
+
+                if st.button(
+                    "🔄 Đọc lại tiêu đề nhiều tầng và làm mới bộ nhớ đệm",
+                    key="refresh_structured_table_cache",
+                    use_container_width=True,
+                ):
+                    _read_table_file_cached.clear()
+                    st.success(
+                        "Đã xóa bộ nhớ đệm; lần tra cứu tiếp theo sẽ đọc lại tệp gốc và chuẩn hóa tiêu đề."
+                    )
+
+                if st.button(
+                    "🧩 Kiểm tra cột chưa nhận diện",
+                    key="check_unrecognized_table_columns",
+                    use_container_width=True,
+                ):
+                    unknown_columns: list[str] = []
+                    known_terms = {
+                        "tt", "stt", "tên công trình", "tên hồ chứa", "họ và tên",
+                        "địa điểm", "chức vụ", "quê quán", "cccd", "số sổ bhxh",
+                        "điện thoại liên lạc", "năm ht", "flv", "wtb",
+                    }
+                    for item in database.get("table_files", []):
+                        path = resolve_table_path(item)
+                        if not path.exists():
+                            continue
+                        try:
+                            for sheet_name, frame in read_table_file_fast(path).items():
+                                for column in frame.columns:
+                                    normalized_column = normalize_table_text(str(column))
+                                    if normalized_column and not any(
+                                        normalize_table_text(term) in normalized_column
+                                        or normalized_column in normalize_table_text(term)
+                                        for term in known_terms
+                                    ):
+                                        unknown_columns.append(
+                                            f"{item.get('name', path.name)} / {sheet_name}: {column}"
+                                        )
+                        except Exception:
+                            continue
+                    if unknown_columns:
+                        st.warning("Cột cần rà soát: " + " | ".join(unknown_columns[:12]))
+                    else:
+                        st.success("Chưa phát hiện cột cần rà soát trong các bảng đọc được.")
+
+                if st.button(
+                    "🔍 Kiểm tra tệp bảng trùng lặp",
+                    key="check_duplicate_table_files",
+                    use_container_width=True,
+                ):
+                    names = [
+                        str(item.get("name", "")).strip().casefold()
+                        for item in database.get("table_files", [])
+                        if str(item.get("name", "")).strip()
+                    ]
+                    duplicates = sorted({name for name in names if names.count(name) > 1})
+                    if duplicates:
+                        st.warning("Tệp bảng trùng tên: " + " | ".join(duplicates[:10]))
+                    else:
+                        st.success("Không phát hiện tệp bảng trùng tên.")
+
+                if st.button(
+                    "🔗 Kiểm tra liên kết dữ liệu công trình",
+                    key="check_structure_data_links",
+                    use_container_width=True,
+                ):
+                    st.info(
+                        "Hệ thống sẽ đối chiếu các trường tên công trình, tên hồ chứa, đập, đê, kè, "
+                        "mỏ hàn, kênh và trạm bơm khi tra cứu. Các cột chưa nhận diện được liệt kê ở mục trên."
+                    )
+
+                if st.button(
+                    "📊 Thống kê kho dữ liệu dạng bảng",
+                    key="structured_repository_statistics",
+                    use_container_width=True,
+                ):
                     total_sheets = 0
                     total_rows = 0
                     total_columns = 0
-                    missing_paths: list[str] = []
-                    for item in table_files:
-                        item_path = resolve_table_path(item)
-                        if not item_path.exists():
-                            missing_paths.append(str(item.get("name", "Không rõ tên")))
+                    for item in database.get("table_files", []):
+                        path = resolve_table_path(item)
+                        if not path.exists():
                             continue
                         try:
-                            item_sheets = read_table_file_fast(item_path)
-                            total_sheets += len(item_sheets)
-                            total_rows += sum(len(frame) for frame in item_sheets.values())
-                            total_columns += sum(len(frame.columns) for frame in item_sheets.values())
-                        except Exception as error:
-                            missing_paths.append(
-                                f"{item.get('name', 'Không rõ tên')}: {error}"
-                            )
-                    st.caption(
-                        f"Tệp: {len(table_files)} | Sheet: {total_sheets} | "
-                        f"Tổng dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}"
-                    )
-                    if missing_paths:
-                        st.warning(
-                            "Có tệp cần kiểm tra: " + " | ".join(missing_paths[:5])
-                        )
-                    else:
-                        st.success("Các tệp bảng đang truy cập được.")
-
-                with st.expander("🛠️ Bảo trì kho dữ liệu dạng bảng", expanded=False):
-                    st.caption(
-                        "Làm sạch tệp lỗi, đọc lại tiêu đề nhiều tầng, kiểm tra trùng lặp và thống kê dữ liệu."
+                            sheets = read_table_file_fast(path)
+                            total_sheets += len(sheets)
+                            total_rows += sum(len(frame) for frame in sheets.values())
+                            total_columns += sum(len(frame.columns) for frame in sheets.values())
+                        except Exception:
+                            continue
+                    st.info(
+                        f"Tệp: {len(database.get('table_files', []))} | Sheet: {total_sheets} | "
+                        f"Dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}."
                     )
 
-                    if st.button(
-                        "🧹 Làm sạch bảng lỗi hoặc bị mất",
-                        key="clean_missing_structured_tables",
-                        use_container_width=True,
-                    ):
-                        before = len(database.get("table_files", []))
-                        database["table_files"] = [
-                            item for item in database.get("table_files", [])
-                            if resolve_table_path(item).exists()
-                        ]
-                        save_database(database)
-                        removed_count = before - len(database.get("table_files", []))
-                        st.success(f"Đã loại {removed_count} mục bảng lỗi hoặc không còn tệp gốc.")
-                        st.rerun()
-
-                    if st.button(
-                        "🔄 Đọc lại tiêu đề nhiều tầng và làm mới bộ nhớ đệm",
-                        key="refresh_structured_table_cache",
-                        use_container_width=True,
-                    ):
-                        _read_table_file_cached.clear()
-                        st.success(
-                            "Đã xóa bộ nhớ đệm; lần tra cứu tiếp theo sẽ đọc lại tệp gốc và chuẩn hóa tiêu đề."
-                        )
-
-                    if st.button(
-                        "🧩 Kiểm tra cột chưa nhận diện",
-                        key="check_unrecognized_table_columns",
-                        use_container_width=True,
-                    ):
-                        unknown_columns: list[str] = []
-                        known_terms = {
-                            "tt", "stt", "tên công trình", "tên hồ chứa", "họ và tên",
-                            "địa điểm", "chức vụ", "quê quán", "cccd", "số sổ bhxh",
-                            "điện thoại liên lạc", "năm ht", "flv", "wtb",
-                        }
-                        for item in database.get("table_files", []):
-                            path = resolve_table_path(item)
-                            if not path.exists():
-                                continue
-                            try:
-                                for sheet_name, frame in read_table_file_fast(path).items():
-                                    for column in frame.columns:
-                                        normalized_column = normalize_table_text(str(column))
-                                        if normalized_column and not any(
-                                            normalize_table_text(term) in normalized_column
-                                            or normalized_column in normalize_table_text(term)
-                                            for term in known_terms
-                                        ):
-                                            unknown_columns.append(
-                                                f"{item.get('name', path.name)} / {sheet_name}: {column}"
-                                            )
-                            except Exception:
-                                continue
-                        if unknown_columns:
-                            st.warning("Cột cần rà soát: " + " | ".join(unknown_columns[:12]))
-                        else:
-                            st.success("Chưa phát hiện cột cần rà soát trong các bảng đọc được.")
-
-                    if st.button(
-                        "🔍 Kiểm tra tệp bảng trùng lặp",
-                        key="check_duplicate_table_files",
-                        use_container_width=True,
-                    ):
-                        names = [
-                            str(item.get("name", "")).strip().casefold()
-                            for item in database.get("table_files", [])
-                            if str(item.get("name", "")).strip()
-                        ]
-                        duplicates = sorted({name for name in names if names.count(name) > 1})
-                        if duplicates:
-                            st.warning("Tệp bảng trùng tên: " + " | ".join(duplicates[:10]))
-                        else:
-                            st.success("Không phát hiện tệp bảng trùng tên.")
-
-                    if st.button(
-                        "🔗 Kiểm tra liên kết dữ liệu công trình",
-                        key="check_structure_data_links",
-                        use_container_width=True,
-                    ):
-                        st.info(
-                            "Hệ thống sẽ đối chiếu các trường tên công trình, tên hồ chứa, đập, đê, kè, "
-                            "mỏ hàn, kênh và trạm bơm khi tra cứu. Các cột chưa nhận diện được liệt kê ở mục trên."
-                        )
-
-                    if st.button(
-                        "📊 Thống kê kho dữ liệu dạng bảng",
-                        key="structured_repository_statistics",
-                        use_container_width=True,
-                    ):
-                        total_sheets = 0
-                        total_rows = 0
-                        total_columns = 0
-                        for item in database.get("table_files", []):
-                            path = resolve_table_path(item)
-                            if not path.exists():
-                                continue
-                            try:
-                                sheets = read_table_file_fast(path)
-                                total_sheets += len(sheets)
-                                total_rows += sum(len(frame) for frame in sheets.values())
-                                total_columns += sum(len(frame.columns) for frame in sheets.values())
-                            except Exception:
-                                continue
-                        st.info(
-                            f"Tệp: {len(database.get('table_files', []))} | Sheet: {total_sheets} | "
-                            f"Dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}."
-                        )
-
-                    with st.expander("📋 Nhật ký bảo trì", expanded=False):
-                        st.caption(
-                            "Các kết quả bảo trì được hiển thị ngay sau từng thao tác. "
-                            "Nhật ký lưu dài hạn sẽ được bổ sung khi triển khai cơ sở dữ liệu quản trị riêng."
-                        )
-
+                with st.expander("📋 Nhật ký bảo trì", expanded=False):
+                    st.caption(
+                        "Các kết quả bảo trì được hiển thị ngay sau từng thao tác. "
+                        "Nhật ký lưu dài hạn sẽ được bổ sung khi triển khai cơ sở dữ liệu quản trị riêng."
+                    )
     if use_file_search and st.session_state.get("rag_diagnostics"):
         diagnostic = st.session_state["rag_diagnostics"]
         with st.expander("🧪 Chẩn đoán tra cứu kho dữ liệu dạng văn bản", expanded=False):
