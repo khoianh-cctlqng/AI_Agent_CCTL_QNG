@@ -1149,31 +1149,179 @@ def canonical_column_name(column_name: Any) -> str:
 
 
 def clean_table_dataframe(dataframe: Any) -> Any:
+    """Chuẩn hóa bảng CSV/Excel, kể cả bảng có tiêu đề nhiều tầng và ô gộp."""
     dataframe = dataframe.copy()
-    dataframe = dataframe.dropna(how="all").dropna(axis=1, how="all")
-    dataframe.columns = [
-        canonical_column_name(column)
-        for column in dataframe.columns
+
+    # Chuẩn hóa ô trước khi dò tiêu đề; giữ nguyên số 0 ở đầu mã/số điện thoại.
+    dataframe = dataframe.fillna("")
+    for column in dataframe.columns:
+        dataframe[column] = dataframe[column].astype(str).map(str.strip)
+
+    # Bỏ hàng/cột hoàn toàn trống.
+    dataframe = dataframe.loc[
+        ~dataframe.apply(
+            lambda row: all(not str(value).strip() for value in row),
+            axis=1,
+        )
+    ]
+    dataframe = dataframe.loc[
+        :,
+        ~dataframe.apply(
+            lambda column: all(not str(value).strip() for value in column),
+            axis=0,
+        ),
     ]
 
+    if dataframe.empty:
+        return dataframe.reset_index(drop=True)
+
+    # CSV hoặc bảng đã có tên cột hợp lệ: chỉ chuẩn hóa tên cột như trước.
+    existing_columns = [canonical_column_name(column) for column in dataframe.columns]
+    existing_canonical = set(existing_columns)
+    if "Họ và tên" in existing_canonical:
+        dataframe.columns = existing_columns
+    else:
+        # Excel được đọc với header=None. Tìm hàng tiêu đề chính trong 20 hàng đầu.
+        header_terms = {
+            "ho va ten",
+            "chuc vu",
+            "que quan",
+            "trinh do chuyen mon",
+            "trinh do llct",
+            "ngay vao dang",
+            "cccd",
+            "so so bhxh",
+            "dien thoai",
+        }
+        header_index: int | None = None
+        best_score = 0
+
+        for position in range(min(len(dataframe), 20)):
+            values = [
+                normalize_table_text(value)
+                for value in dataframe.iloc[position].tolist()
+            ]
+            score = sum(
+                1
+                for term in header_terms
+                if any(term == value or term in value for value in values)
+            )
+            if score > best_score:
+                best_score = score
+                header_index = position
+
+        if header_index is None or best_score < 2:
+            # Không nhận diện chắc chắn được tiêu đề thì không đoán cấu trúc bảng.
+            dataframe.columns = existing_columns
+        else:
+            parent_headers = [
+                str(value).strip()
+                for value in dataframe.iloc[header_index].tolist()
+            ]
+
+            # Ô gộp theo chiều ngang tạo các ô trống; điền tên nhóm sang phải.
+            last_parent = ""
+            for index, value in enumerate(parent_headers):
+                if value:
+                    last_parent = value
+                elif last_parent:
+                    parent_headers[index] = last_parent
+
+            child_headers = [""] * len(parent_headers)
+            data_start_index = header_index + 1
+
+            if header_index + 1 < len(dataframe):
+                candidate_children = [
+                    str(value).strip()
+                    for value in dataframe.iloc[header_index + 1].tolist()
+                ]
+                child_tokens = {
+                    normalize_table_text(value)
+                    for value in candidate_children
+                    if str(value).strip()
+                }
+                # File lý lịch có hàng con Nam/Nữ dưới cột ngày sinh.
+                if child_tokens.intersection({"nam", "nu"}):
+                    child_headers = candidate_children
+                    data_start_index = header_index + 2
+
+            normalized_columns: list[str] = []
+            for index, parent in enumerate(parent_headers):
+                child = child_headers[index] if index < len(child_headers) else ""
+                parent = str(parent).strip()
+                child = str(child).strip()
+
+                if child and normalize_table_text(child) not in {
+                    normalize_table_text(parent),
+                    "stt",
+                }:
+                    column_name = f"{parent} - {child}" if parent else child
+                else:
+                    column_name = parent or child or f"Cột {index + 1}"
+
+                normalized = normalize_table_text(column_name)
+
+                # Chuẩn hóa chính xác các trường nhạy cảm, không suy đoán theo vị trí cột.
+                if "ho va ten" in normalized or normalized == "ho ten":
+                    canonical = "Họ và tên"
+                elif normalized == "cccd" or normalized == "cmnd" or "can cuoc" in normalized:
+                    canonical = "CCCD"
+                elif "so so bhxh" in normalized or normalized == "bhxh":
+                    canonical = "Số sổ BHXH"
+                elif "so the bhyt" in normalized or normalized == "bhyt":
+                    canonical = "Số thẻ BHYT"
+                elif "dien thoai" in normalized or normalized == "sdt":
+                    canonical = "Số điện thoại"
+                elif "ngay thang nam cap" in normalized or normalized == "ngay cap":
+                    canonical = "Ngày cấp CCCD"
+                elif "ngay vao dang" in normalized:
+                    canonical = "Ngày vào Đảng"
+                elif "trinh do chuyen mon" in normalized:
+                    canonical = "Trình độ chuyên môn"
+                elif "trinh do llct" in normalized or "ly luan chinh tri" in normalized:
+                    canonical = "Trình độ LLCT"
+                elif "chuc vu" in normalized or "chuc danh" in normalized:
+                    canonical = "Chức vụ"
+                elif "que quan" in normalized:
+                    canonical = "Quê quán"
+                elif "ngay thang nam sinh" in normalized or normalized == "ngay sinh":
+                    canonical = "Ngày sinh"
+                else:
+                    canonical = canonical_column_name(column_name)
+
+                normalized_columns.append(canonical)
+
+            dataframe = dataframe.iloc[data_start_index:].copy()
+            dataframe.columns = normalized_columns
+
+    # Tạo tên duy nhất nếu có cột trùng nhau.
     seen: dict[str, int] = {}
     unique_columns: list[str] = []
     for column in dataframe.columns:
+        column = str(column).strip() or "Cột"
         count = seen.get(column, 0)
         seen[column] = count + 1
-        unique_columns.append(
-            column if count == 0 else f"{column}_{count + 1}"
-        )
+        unique_columns.append(column if count == 0 else f"{column}_{count + 1}")
     dataframe.columns = unique_columns
 
     for column in dataframe.columns:
-        dataframe[column] = (
-            dataframe[column]
-            .fillna("")
-            .astype(str)
-            .map(str.strip)
-        )
-    return dataframe
+        dataframe[column] = dataframe[column].fillna("").astype(str).map(str.strip)
+
+    # Loại các dòng phân nhóm, tiêu đề lặp và dòng trống; không loại dữ liệu thật.
+    if "Họ và tên" in dataframe.columns:
+        excluded_names = {
+            "",
+            "ho va ten",
+            "cong chuc",
+            "vien chuc",
+            "hop dong",
+            "nguoi lao dong",
+        }
+        dataframe = dataframe[
+            ~dataframe["Họ và tên"].map(normalize_table_text).isin(excluded_names)
+        ]
+
+    return dataframe.reset_index(drop=True)
 
 
 def read_table_file(file_path: Path) -> dict[str, Any]:
@@ -1199,6 +1347,7 @@ def read_table_file(file_path: Path) -> dict[str, Any]:
         sheets = pd.read_excel(
             file_path,
             sheet_name=None,
+            header=None,
             dtype=str,
             keep_default_na=False,
             engine="openpyxl",
