@@ -2084,24 +2084,47 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
     preferred_fields = [
         "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
         "Trình độ chuyên môn", "Trình độ LLCT", "Ngày vào Đảng",
-        "CCCD", "Số sổ BHXH", "Số thẻ BHYT", "Số điện thoại",
+        "CCCD", "Ngày cấp CCCD", "Số sổ BHXH", "Số thẻ BHYT",
+        "Số điện thoại liên lạc", "Số điện thoại",
     ]
+
+    def clean_person_column_label(label: str) -> str:
+        """Bỏ tiền tố tên bảng bị ghép dư vào nhãn cột nhân sự."""
+        cleaned = re.sub(r"\s+", " ", str(label)).strip()
+        normalized = normalize_table_text(cleaned)
+        if "danh sach ly lich trich ngang" in normalized and " - " in cleaned:
+            cleaned = cleaned.rsplit(" - ", 1)[-1].strip()
+        return cleaned
+
     rows: list[tuple[str, str]] = []
     used: set[str] = set()
     for requested in preferred_fields:
+        requested_norm = normalize_table_text(requested)
         for column, value in item["values"].items():
-            if normalize_table_text(column) == normalize_table_text(requested):
+            clean_column = clean_person_column_label(column)
+            column_norm = normalize_table_text(clean_column)
+            # Chấp nhận cả nhãn chuẩn và nhãn từng bị ghép tiền tố tên bảng.
+            if column_norm == requested_norm or column_norm.endswith(" " + requested_norm):
                 rows.append((requested, value))
                 used.add(column)
                 break
-    for column, value in item["values"].items():
-        if column not in used and len(rows) < 14:
-            rows.append((column, value))
 
-    table = "\n".join(f"| {label} | {value} |" for label, value in rows)
+    for column, value in item["values"].items():
+        if column in used or len(rows) >= 14:
+            continue
+        clean_column = clean_person_column_label(column)
+        clean_norm = normalize_table_text(clean_column)
+        if clean_norm in {"", "stt", "tt"}:
+            continue
+        rows.append((clean_column, value))
+
+    table = "\n".join(
+        f"| {index} | {label} | {value} |"
+        for index, (label, value) in enumerate(rows, start=1)
+    )
     return (
         f"**{item['person']}**\n\n"
-        "| Thông tin | Giá trị |\n|---|---|\n"
+        "| STT | Nội dung | Thông tin |\n|---:|---|---|\n"
         f"{table}\n\n"
         f"**Nguồn bảng dữ liệu:** `{item['file']}` — sheet `{item['sheet']}` — dòng {item['row']}."
     )
