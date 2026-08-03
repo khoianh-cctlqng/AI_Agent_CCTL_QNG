@@ -1104,6 +1104,57 @@ def append_message(
     save_database(database)
 
 
+def delete_question_exchange(
+    database: dict[str, Any],
+    conversation_id: str,
+    user_message_index: int,
+) -> bool:
+    """Xóa riêng một lượt hỏi–đáp trong cuộc trò chuyện.
+
+    Lượt hỏi–đáp bắt đầu tại tin nhắn người dùng được chọn và kết thúc
+    ngay trước câu hỏi kế tiếp. Nhờ vậy nút thùng rác ở một dòng lịch sử
+    không làm mất các câu hỏi khác trong cùng cuộc trò chuyện.
+    """
+    conversation = database.get("conversations", {}).get(conversation_id)
+    if not conversation:
+        return False
+
+    messages = conversation.get("messages", [])
+    if not (0 <= user_message_index < len(messages)):
+        return False
+    if messages[user_message_index].get("role") != "user":
+        return False
+
+    end_index = user_message_index + 1
+    while (
+        end_index < len(messages)
+        and messages[end_index].get("role") != "user"
+    ):
+        end_index += 1
+
+    del messages[user_message_index:end_index]
+    conversation["messages"] = messages
+    conversation["updated_at"] = now_text()
+
+    remaining_user_messages = [
+        message
+        for message in messages
+        if message.get("role") == "user"
+        and str(message.get("content", "")).strip()
+    ]
+    if remaining_user_messages:
+        conversation["title"] = shorten_title(
+            str(remaining_user_messages[-1].get("content", ""))
+        )
+    else:
+        # Cuộc trò chuyện đã hết nội dung: chỉ xóa vỏ cuộc trò chuyện này.
+        database["conversations"].pop(conversation_id, None)
+        if database.get("active_id") == conversation_id:
+            database["active_id"] = None
+
+    save_database(database)
+    return True
+
 
 # =========================================================
 # KHO BẢNG DỮ LIỆU CÓ CẤU TRÚC
@@ -2942,14 +2993,20 @@ with st.sidebar:
                         f"delete_question_row_{conversation_id}_"
                         f"{history_item['message_index']}"
                     ),
-                    help="Xóa toàn bộ cuộc trò chuyện chứa nội dung này",
+                    help="Chỉ xóa câu hỏi này và phần trả lời đi kèm",
                     use_container_width=True,
                     type="secondary",
                 ):
-                    database["conversations"].pop(conversation_id, None)
-                    if database.get("active_id") == conversation_id:
-                        database["active_id"] = None
-                    save_database(database)
+                    deleted = delete_question_exchange(
+                        database,
+                        conversation_id,
+                        history_item["message_index"],
+                    )
+                    if deleted:
+                        st.session_state.pop(
+                            "history_focus_message_index",
+                            None,
+                        )
                     st.rerun()
 
     st.divider()
