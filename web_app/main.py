@@ -3558,6 +3558,44 @@ else:
                 latest_user_absolute_index = absolute_index
                 break
 
+def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
+    """Đưa câu hỏi vừa gửi vào vùng giữa màn hình, tránh bị ô chat che."""
+    components.html(
+        f"""
+        <script>
+        const focusCurrentQuestion = () => {{
+            const parentDoc = window.parent.document;
+            const anchor = parentDoc.getElementById({anchor_id!r});
+            if (!anchor) return;
+
+            const main = parentDoc.querySelector(
+                '[data-testid="stMain"], section.main, .main'
+            );
+            const rect = anchor.getBoundingClientRect();
+            const viewportHeight = window.parent.innerHeight || 800;
+            const desiredTop = Math.max(110, viewportHeight * 0.30);
+            const delta = rect.top - desiredTop;
+
+            if (main && typeof main.scrollBy === "function") {{
+                main.scrollBy({{ top: delta, left: 0, behavior: "auto" }});
+            }} else {{
+                window.parent.scrollBy({{
+                    top: delta,
+                    left: 0,
+                    behavior: "auto"
+                }});
+            }}
+        }};
+
+        [40, 160, 420, 900, 1500].forEach((delay) => {{
+            setTimeout(focusCurrentQuestion, delay);
+        }});
+        </script>
+        """,
+        height=0,
+    )
+
+
     visible_start_index = max(0, len(conversation["messages"]) - len(visible_messages))
 
     for message_index, message in enumerate(visible_messages):
