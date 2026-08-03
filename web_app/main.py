@@ -1703,13 +1703,60 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
     ]
     if named_matches:
         item = max(named_matches, key=lambda x: len(normalize_table_text(x["name"])))
-        ignored = {"STT", "Tên công trình", "Cột 1", "Cột 2"}
-        rows = []
+        ignored = {"STT", "Tên công trình", "Tên hồ chứa", "Tên hồ", "Cột 1", "Cột 2"}
+        rows: list[str] = []
+        pending_parent = ""
+
         for field, value in item["values"].items():
-            if field in ignored or normalize_table_text(field).startswith("cot "):
+            field_text = str(field).strip()
+            value_text = str(value).strip()
+            normalized_field = normalize_table_text(field_text)
+            normalized_value = normalize_table_text(value_text)
+
+            if field_text in ignored or normalized_field.startswith("cot "):
                 continue
-            rows.append(f"| {field} | {value} |")
-        details = "\n".join(rows[:24]) or "| Loại công trình | " + item["type"] + " |"
+
+            # Không hiển thị lại chính tên công trình trong bảng chi tiết.
+            if normalized_field in {"ten cong trinh", "ten ho chua", "ten ho", "ten dap", "ten ke"}:
+                continue
+
+            is_empty_value = normalized_value in {"", "nan", "none"}
+            is_unit_or_child = (
+                field_text.startswith("(")
+                or normalized_field in {
+                    "ht", "tk", "tt", "hmax", "b", "l", "mn dbt", "mndbt",
+                    "cao trinh", "kich thuoc", "hinh thuc", "luu luong tk",
+                }
+            )
+
+            # Các bảng nhiều tầng thường tạo một cột cha không có giá trị,
+            # rồi cột con/đơn vị kế tiếp mới chứa giá trị. Giữ lại cột cha
+            # để ghép nhãn, tránh hiển thị thành hai hàng lệch nhau.
+            if is_empty_value:
+                pending_parent = field_text
+                continue
+
+            display_field = field_text
+            if pending_parent:
+                if is_unit_or_child or field_text.startswith("("):
+                    display_field = f"{pending_parent} {field_text}".strip()
+                else:
+                    # Nếu cột kế tiếp không phải cột con thì bỏ cột cha rỗng.
+                    display_field = field_text
+                pending_parent = ""
+
+            # Chuẩn hóa cách viết một số đơn vị thường gặp.
+            display_field = (
+                display_field
+                .replace("(km2)", "(km²)")
+                .replace("(m2)", "(m²)")
+                .replace("(m3)", "(m³)")
+                .replace("(106 m3)", "(10⁶ m³)")
+                .replace("(10^6 m3)", "(10⁶ m³)")
+            )
+            rows.append(f"| {display_field} | {value_text} |")
+
+        details = "\n".join(rows[:30]) or "| Loại công trình | " + item["type"] + " |"
         return (
             f"**{item['name']}** là **{item['type'].lower()}** trong kho bảng dữ liệu.\n\n"
             "| Thông tin | Giá trị |\n|---|---|\n"
