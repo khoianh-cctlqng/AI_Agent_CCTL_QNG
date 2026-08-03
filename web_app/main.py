@@ -2326,7 +2326,7 @@ def lookup_structured_table(
         if requested_field in sensitive_fields and database.get("table_files"):
             return (
                 f"Chưa tìm thấy **{requested_field}** tương ứng trong kho bảng dữ liệu.\n\n"
-                "**Khuyến cáo kiểm tra:** Mở mục *Kho bảng dữ liệu*, chọn đúng "
+                "**Khuyến cáo kiểm tra:** Mở mục *Kho dữ liệu dạng bảng*, chọn đúng "
                 "file/sheet và kiểm tra tên người, tên cột. Hệ thống không chuyển "
                 "sang suy đoán từ PDF đối với trường thông tin nhạy cảm này."
             )
@@ -2503,7 +2503,7 @@ def question_requests_documents(question: str) -> bool:
     terms = [
         "theo tài liệu", "tài liệu dùng chung", "trong kho", "theo hồ sơ",
         "theo văn bản", "quyết định", "quy trình", "quy định", "biên bản",
-        "báo cáo", "phụ lục", "file pdf", "file word", "tài liệu đã nạp",
+        "báo cáo", "phụ lục", "file pdf", "file word", "tệp dữ liệu đã nạp",
         "căn cứ tài liệu", "tra cứu", "liên hồ",
     ]
     return any(term in normalized for term in terms)
@@ -3343,17 +3343,17 @@ with st.sidebar:
         )
 
     st.divider()
-    st.markdown("##### Tài liệu dùng chung")
+    st.markdown("##### 📄 Kho dữ liệu dạng văn bản")
 
     uploaded_files = st.file_uploader(
-        "Tải tài liệu",
+        "Nạp dữ liệu vào kho",
         type=["pdf", "docx", "doc", "txt", "md"],
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
 
     if uploaded_files and st.button(
-        "Đưa tài liệu vào kho",
+        "⬆️ Nạp dữ liệu vào kho",
         use_container_width=True,
     ):
         try:
@@ -3366,14 +3366,14 @@ with st.sidebar:
                 upload_document(client, database, uploaded_file)
                 progress.progress(index / len(uploaded_files))
 
-            status_box.success("Đã đưa tài liệu vào kho.")
+            status_box.success("Đã nạp dữ liệu vào kho dạng văn bản.")
             st.rerun()
         except Exception as error:
             st.error(f"Không thể tải tài liệu: {error}")
 
     if database["uploaded_files"]:
         with st.expander(
-            f"{len(database['uploaded_files'])} tài liệu đã nạp",
+            f"{len(database['uploaded_files'])} tệp dữ liệu đã nạp",
             expanded=True,
         ):
             visible_files = list(reversed(database["uploaded_files"][-20:]))
@@ -3479,50 +3479,84 @@ with st.sidebar:
                         )
                         st.rerun()
 
-    st.markdown("###### Làm sạch kho trước khi sử dụng chính thức")
-    st.caption(
-        "Xóa các file tên tạm như tmp..., temp... còn sót trong Vector Store. "
-        "Các file có tên gốc do anh/chị tải lên được giữ nguyên."
-    )
-
-    if st.button(
-        "🧹 Làm sạch file tạm trong kho",
-        key="cleanup_temporary_repository_files",
-        use_container_width=True,
-    ):
-        try:
-            client = get_client()
-            with st.spinner("Đang rà soát và xóa file tạm..."):
-                cleanup_result = cleanup_vector_store_temporary_files(
-                    client,
-                    database,
+    with st.expander("🔎 Chẩn đoán kho dữ liệu dạng văn bản", expanded=False):
+        st.caption(
+            "Kiểm tra trạng thái chỉ mục, số tệp đã xử lý và lỗi trong kho văn bản."
+        )
+        if st.button(
+            "Kiểm tra trạng thái kho văn bản",
+            key="check_text_repository_status",
+            use_container_width=True,
+        ):
+            try:
+                client = get_client()
+                vector_store_id = ensure_vector_store(client, database)
+                vector_store = client.vector_stores.retrieve(
+                    vector_store_id=vector_store_id
                 )
-            removed = cleanup_result.get("removed", [])
-            errors = cleanup_result.get("errors", [])
-            if removed:
+                counts = vector_store.file_counts
                 st.success(
-                    "Đã xóa file tạm: " + ", ".join(removed)
+                    "Kho đang hoạt động — "
+                    f"Hoàn tất: {counts.completed}; "
+                    f"Đang xử lý: {counts.in_progress}; "
+                    f"Lỗi: {counts.failed}; "
+                    f"Tổng: {counts.total}."
                 )
-            else:
-                st.success("Kho không còn file tạm cần xóa.")
-            if errors:
-                st.warning(
-                    "Một số mục chưa làm sạch được: "
-                    + " | ".join(errors[:3])
-                )
-            st.rerun()
-        except Exception as error:
-            st.error(f"Không thể làm sạch kho: {error}")
+                st.caption(f"Vector Store ID: {vector_store_id}")
+            except Exception as error:
+                st.error(f"Không kiểm tra được kho văn bản: {error}")
+
+    with st.expander("🛠️ Bảo trì kho dữ liệu dạng văn bản", expanded=False):
+        st.caption(
+            "Các chức năng quản trị được thu gọn để tránh làm rối giao diện sử dụng hằng ngày."
+        )
+        st.markdown("**Làm sạch tệp tạm**")
+        st.caption(
+            "Xóa các tệp tên tạm như tmp..., temp... còn sót trong Vector Store; "
+            "các tệp có tên gốc được giữ nguyên."
+        )
+        if st.button(
+            "🧹 Làm sạch tệp tạm trong kho",
+            key="cleanup_temporary_repository_files",
+            use_container_width=True,
+        ):
+            try:
+                client = get_client()
+                with st.spinner("Đang rà soát và xóa tệp tạm..."):
+                    cleanup_result = cleanup_vector_store_temporary_files(
+                        client,
+                        database,
+                    )
+                removed = cleanup_result.get("removed", [])
+                errors = cleanup_result.get("errors", [])
+                if removed:
+                    st.success("Đã xóa tệp tạm: " + ", ".join(removed))
+                else:
+                    st.success("Kho không còn tệp tạm cần xóa.")
+                if errors:
+                    st.warning(
+                        "Một số mục chưa làm sạch được: "
+                        + " | ".join(errors[:3])
+                    )
+                st.rerun()
+            except Exception as error:
+                st.error(f"Không thể làm sạch kho: {error}")
+
+        st.markdown("**Thông tin quản trị**")
+        st.caption(
+            f"Danh mục cục bộ đang ghi nhận {len(database.get('uploaded_files', []))} tệp văn bản."
+        )
+
 
 
     st.divider()
-    st.markdown("##### Kho bảng dữ liệu")
+    st.markdown("##### 📊 Kho dữ liệu dạng bảng")
 
     if not PANDAS_AVAILABLE:
         st.warning("Chưa cài pandas/openpyxl nên chưa dùng được kho bảng.")
     else:
         table_uploads = st.file_uploader(
-            "Tải Excel hoặc CSV",
+            "Nạp dữ liệu vào kho",
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key="structured_table_uploader",
@@ -3530,14 +3564,14 @@ with st.sidebar:
         )
 
         if table_uploads and st.button(
-            "Đưa bảng dữ liệu vào hệ thống",
+            "⬆️ Nạp dữ liệu vào kho",
             key="save_structured_tables",
             use_container_width=True,
         ):
             try:
                 for table_upload in table_uploads:
                     save_table_file(database, table_upload)
-                st.success("Đã nạp bảng dữ liệu.")
+                st.success("Đã nạp dữ liệu vào kho dạng bảng.")
                 st.rerun()
             except Exception as error:
                 st.error(f"Không thể nạp bảng: {error}")
@@ -3545,7 +3579,7 @@ with st.sidebar:
         table_files = database.get("table_files", [])
         if table_files:
             with st.expander(
-                f"🧮 {len(table_files)} bảng dữ liệu đã nạp",
+                f"🧮 {len(table_files)} tệp dữ liệu đã nạp",
                 expanded=True,
             ):
                 # Hiện nút xóa ngay cạnh từng bảng, không cần chọn bảng trước.
@@ -3648,32 +3682,56 @@ with st.sidebar:
                         delete_table_file(database, selected_id)
                         st.rerun()
 
-    if st.button(
-        "🔎 Kiểm tra kho tài liệu",
-        use_container_width=True,
-        help="Kiểm tra trực tiếp trạng thái kho tài liệu trên OpenAI.",
-    ):
-        try:
-            client = get_client()
-            vector_store_id = ensure_vector_store(client, database)
-            vector_store = client.vector_stores.retrieve(
-                vector_store_id=vector_store_id
-            )
-            counts = vector_store.file_counts
-            st.success(
-                "Kho đang hoạt động — "
-                f"Hoàn tất: {counts.completed}; "
-                f"Đang xử lý: {counts.in_progress}; "
-                f"Lỗi: {counts.failed}; "
-                f"Tổng: {counts.total}."
-            )
-            st.caption(f"Vector Store ID: {vector_store_id}")
-        except Exception as error:
-            st.error(f"Không kiểm tra được kho tài liệu: {error}")
+                with st.expander("🔎 Chẩn đoán kho dữ liệu dạng bảng", expanded=False):
+                    total_sheets = 0
+                    total_rows = 0
+                    total_columns = 0
+                    missing_paths: list[str] = []
+                    for item in table_files:
+                        item_path = resolve_table_path(item)
+                        if not item_path.exists():
+                            missing_paths.append(str(item.get("name", "Không rõ tên")))
+                            continue
+                        try:
+                            item_sheets = read_table_file_fast(item_path)
+                            total_sheets += len(item_sheets)
+                            total_rows += sum(len(frame) for frame in item_sheets.values())
+                            total_columns += sum(len(frame.columns) for frame in item_sheets.values())
+                        except Exception as error:
+                            missing_paths.append(
+                                f"{item.get('name', 'Không rõ tên')}: {error}"
+                            )
+                    st.caption(
+                        f"Tệp: {len(table_files)} | Sheet: {total_sheets} | "
+                        f"Tổng dòng: {total_rows:,} | Tổng cột theo sheet: {total_columns:,}"
+                    )
+                    if missing_paths:
+                        st.warning(
+                            "Có tệp cần kiểm tra: " + " | ".join(missing_paths[:5])
+                        )
+                    else:
+                        st.success("Các tệp bảng đang truy cập được.")
+
+                with st.expander("🛠️ Bảo trì kho dữ liệu dạng bảng", expanded=False):
+                    st.caption(
+                        "Làm mới bộ nhớ đệm, đọc lại tiêu đề nhiều tầng và thống kê dữ liệu."
+                    )
+                    if st.button(
+                        "🔄 Đọc lại bảng và làm mới bộ nhớ đệm",
+                        key="refresh_structured_table_cache",
+                        use_container_width=True,
+                    ):
+                        _read_table_file_cached.clear()
+                        st.success(
+                            "Đã xóa bộ nhớ đệm. Lần tra cứu tiếp theo sẽ đọc lại bảng từ tệp gốc."
+                        )
+                    st.caption(
+                        "Tên cột và tiêu đề nhiều tầng sẽ được chuẩn hóa lại tự động khi bảng được đọc lại."
+                    )
 
     if use_file_search and st.session_state.get("rag_diagnostics"):
         diagnostic = st.session_state["rag_diagnostics"]
-        with st.expander("🧪 Chẩn đoán tra cứu tài liệu", expanded=False):
+        with st.expander("🧪 Chẩn đoán tra cứu kho dữ liệu dạng văn bản", expanded=False):
             st.caption(
                 f"Vector Store: {diagnostic.get('vector_store_id') or 'Chưa xác định'}"
             )
