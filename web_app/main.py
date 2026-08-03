@@ -1118,8 +1118,18 @@ TABLE_COLUMN_ALIASES: dict[str, list[str]] = {
     "Ngày vào Đảng": ["ngay vao dang", "ngày vào đảng"],
     "CCCD": ["cccd", "cmnd", "can cuoc", "căn cước"],
     "Ngày cấp CCCD": ["ngay cap", "ngày cấp", "ngay thang nam cap"],
-    "Số sổ BHXH": ["so so bhxh", "số sổ bhxh", "bhxh"],
-    "Số thẻ BHYT": ["so the bhyt", "số thẻ bhyt", "bhyt"],
+    "Số sổ BHXH": [
+        "so so bhxh", "số sổ bhxh", "bhxh",
+        "so so bao hiem xa hoi", "số sổ bảo hiểm xã hội",
+        "so bao hiem xa hoi", "số bảo hiểm xã hội",
+        "ma so bao hiem xa hoi", "mã số bảo hiểm xã hội",
+        "bao hiem xa hoi", "bảo hiểm xã hội",
+    ],
+    "Số thẻ BHYT": [
+        "so the bhyt", "số thẻ bhyt", "bhyt",
+        "so the bao hiem y te", "số thẻ bảo hiểm y tế",
+        "bao hiem y te", "bảo hiểm y tế",
+    ],
     "Số điện thoại": ["dien thoai", "điện thoại", "so dien thoai", "sdt"],
 }
 
@@ -1266,9 +1276,17 @@ def clean_table_dataframe(dataframe: Any) -> Any:
                     canonical = "Họ và tên"
                 elif normalized == "cccd" or normalized == "cmnd" or "can cuoc" in normalized:
                     canonical = "CCCD"
-                elif "so so bhxh" in normalized or normalized == "bhxh":
+                elif (
+                    "so so bhxh" in normalized
+                    or normalized == "bhxh"
+                    or "bao hiem xa hoi" in normalized
+                ):
                     canonical = "Số sổ BHXH"
-                elif "so the bhyt" in normalized or normalized == "bhyt":
+                elif (
+                    "so the bhyt" in normalized
+                    or normalized == "bhyt"
+                    or "bao hiem y te" in normalized
+                ):
                     canonical = "Số thẻ BHYT"
                 elif "dien thoai" in normalized or normalized == "sdt":
                     canonical = "Số điện thoại"
@@ -1413,21 +1431,38 @@ def delete_table_file(database: dict[str, Any], table_file_id: str) -> None:
 
 
 def detect_requested_table_field(question: str) -> str:
+    """Nhận diện trường cần tra, kể cả cách viết đầy đủ bằng tiếng Việt."""
     normalized = normalize_table_text(question)
     mapping = {
-        "CCCD": ["cccd", "cmnd", "can cuoc"],
-        "Số sổ BHXH": ["bhxh", "so so bhxh"],
-        "Số thẻ BHYT": ["bhyt", "so the bhyt"],
-        "Số điện thoại": ["so dien thoai", "dien thoai", "sdt"],
-        "Ngày sinh": ["ngay sinh", "sinh ngay"],
+        "CCCD": [
+            "cccd", "cmnd", "can cuoc", "can cuoc cong dan",
+            "so can cuoc", "so can cuoc cong dan",
+        ],
+        "Số sổ BHXH": [
+            "bhxh", "so so bhxh", "so bhxh", "ma so bhxh",
+            "so so bao hiem xa hoi", "so bao hiem xa hoi",
+            "ma so bao hiem xa hoi", "bao hiem xa hoi",
+        ],
+        "Số thẻ BHYT": [
+            "bhyt", "so the bhyt", "so bhyt", "ma the bhyt",
+            "so the bao hiem y te", "so bao hiem y te",
+            "bao hiem y te",
+        ],
+        "Số điện thoại": [
+            "so dien thoai", "dien thoai", "sdt", "so lien lac",
+        ],
+        "Ngày sinh": ["ngay sinh", "sinh ngay", "nam sinh"],
         "Chức vụ": ["chuc vu", "chuc danh"],
         "Quê quán": ["que quan"],
-        "Trình độ chuyên môn": ["trinh do chuyen mon"],
-        "Trình độ LLCT": ["trinh do llct", "ly luan chinh tri"],
-        "Ngày vào Đảng": ["ngay vao dang"],
+        "Trình độ chuyên môn": ["trinh do chuyen mon", "chuyen mon"],
+        "Trình độ LLCT": [
+            "trinh do llct", "ly luan chinh tri", "llct",
+        ],
+        "Ngày vào Đảng": ["ngay vao dang", "vao dang"],
     }
+    # Ưu tiên cụm dài để tránh từ ngắn khớp nhầm.
     for field, terms in mapping.items():
-        if any(term in normalized for term in terms):
+        if any(term in normalized for term in sorted(terms, key=len, reverse=True)):
             return field
     return ""
 
@@ -1444,6 +1479,13 @@ def _resolve_structured_column(dataframe: Any, requested_field: str) -> str | No
         normalized_column = normalize_table_text(column)
         if normalized_column in normalized_aliases:
             return str(column)
+
+    # Chấp nhận tên cột có thêm chú thích, nhưng chỉ khi bí danh đủ rõ.
+    for column in dataframe.columns:
+        normalized_column = normalize_table_text(column)
+        for alias in normalized_aliases:
+            if len(alias) >= 4 and (alias in normalized_column or normalized_column in alias):
+                return str(column)
 
     return None
 
@@ -1531,6 +1573,16 @@ def lookup_structured_table(
                 )
 
     if not matches:
+        sensitive_fields = {
+            "CCCD", "Số sổ BHXH", "Số thẻ BHYT", "Số điện thoại"
+        }
+        if requested_field in sensitive_fields and database.get("table_files"):
+            return (
+                f"Chưa tìm thấy **{requested_field}** tương ứng trong kho bảng dữ liệu.\n\n"
+                "**Khuyến cáo kiểm tra:** Mở mục *Kho bảng dữ liệu*, chọn đúng "
+                "file/sheet và kiểm tra tên người, tên cột. Hệ thống không chuyển "
+                "sang suy đoán từ PDF đối với trường thông tin nhạy cảm này."
+            )
         return None
 
     # Chỉ giữ nhóm khớp tên tốt nhất để tránh chọn nhầm người có tên gần giống.
@@ -2439,7 +2491,10 @@ with st.sidebar:
             st.error(f"Không thể tải tài liệu: {error}")
 
     if database["uploaded_files"]:
-        with st.expander(f"{len(database['uploaded_files'])} tài liệu đã nạp"):
+        with st.expander(
+            f"{len(database['uploaded_files'])} tài liệu đã nạp",
+            expanded=True,
+        ):
             visible_files = list(reversed(database["uploaded_files"][-20:]))
 
             for index, file_info in enumerate(visible_files):
@@ -2575,8 +2630,25 @@ with st.sidebar:
         if table_files:
             with st.expander(
                 f"🧮 {len(table_files)} bảng dữ liệu đã nạp",
-                expanded=False,
+                expanded=True,
             ):
+                # Hiện nút xóa ngay cạnh từng bảng, không cần chọn bảng trước.
+                for table_index, table_info in enumerate(list(table_files)):
+                    table_id = str(table_info.get("id", ""))
+                    table_name = str(table_info.get("name", "Bảng dữ liệu"))
+                    table_name_col, table_delete_col = st.columns([8, 1])
+                    with table_name_col:
+                        st.caption(f"• {table_name}")
+                    with table_delete_col:
+                        if st.button(
+                            "🗑️",
+                            key=f"delete_table_direct_{table_id}_{table_index}",
+                            help=f"Xóa bảng {table_name}",
+                            use_container_width=True,
+                        ):
+                            delete_table_file(database, table_id)
+                            st.rerun()
+
                 selected_id = st.selectbox(
                     "Chọn bảng",
                     options=[str(item.get("id", "")) for item in table_files],
