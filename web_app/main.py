@@ -3545,7 +3545,36 @@ else:
     if hidden_count > 0:
         st.caption(f"Đã ẩn {hidden_count} tin nhắn cũ để tăng tốc hiển thị.")
 
+    # Khi vừa hoàn tất một lượt hỏi - đáp, giữ câu hỏi mới nhất ở vùng giữa
+    # màn hình thay vì để ô chat cố định che khuất. Cờ này chỉ dùng một lần
+    # sau khi ứng dụng rerun để không giật màn hình khi người dùng tự cuộn.
+    focus_latest_question = bool(
+        st.session_state.get("focus_latest_question_after_rerun", False)
+    )
+    latest_user_absolute_index = -1
+    if focus_latest_question:
+        for absolute_index in range(len(conversation["messages"]) - 1, -1, -1):
+            if conversation["messages"][absolute_index].get("role") == "user":
+                latest_user_absolute_index = absolute_index
+                break
+
+    visible_start_index = max(0, len(conversation["messages"]) - len(visible_messages))
+
     for message_index, message in enumerate(visible_messages):
+        absolute_index = visible_start_index + message_index
+
+        if (
+            focus_latest_question
+            and message.get("role") == "user"
+            and absolute_index == latest_user_absolute_index
+        ):
+            st.markdown(
+                '<div id="current-question-anchor" '
+                'style="height:1px; scroll-margin-top:150px; '
+                'scroll-margin-bottom:320px;"></div>',
+                unsafe_allow_html=True,
+            )
+
         avatar = "👨🏻" if message["role"] == "user" else "💧"
         with st.chat_message(message["role"], avatar=avatar):
             if message["role"] == "assistant":
@@ -3558,6 +3587,10 @@ else:
                 )
             else:
                 st.markdown(message["content"])
+
+    if focus_latest_question and latest_user_absolute_index >= 0:
+        focus_current_question()
+        st.session_state["focus_latest_question_after_rerun"] = False
 
 # Điều khiển vị trí cuộn:
 # - Không tự cuộn xuống sát đáy vì ô chat cố định có thể che câu hỏi mới.
@@ -3638,7 +3671,7 @@ def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
             );
             const rect = anchor.getBoundingClientRect();
             const viewportHeight = window.parent.innerHeight || 800;
-            const desiredTop = Math.max(90, viewportHeight * 0.34);
+            const desiredTop = Math.max(110, viewportHeight * 0.30);
             const delta = rect.top - desiredTop;
 
             if (main && typeof main.scrollBy === "function") {{
@@ -3653,7 +3686,7 @@ def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
         }};
 
         // Chạy nhiều lần vì nội dung trả lời/spinner có thể làm thay đổi chiều cao trang.
-        [40, 160, 420, 900].forEach((delay) => {{
+        [40, 160, 420, 900, 1500].forEach((delay) => {{
             setTimeout(focusCurrentQuestion, delay);
         }});
         </script>
@@ -3840,5 +3873,9 @@ if question:
                 st.error(answer)
 
     append_message(database, conversation_id, "assistant", answer)
+    # Sau rerun, đánh dấu câu hỏi mới nhất để bộ hiển thị lịch sử đặt neo
+    # đúng vị trí. Nếu không có cờ này, lần rerun sau khi nhận câu trả lời
+    # sẽ làm mất vị trí cuộn và câu hỏi lại bị ô chat phía dưới che khuất.
+    st.session_state["focus_latest_question_after_rerun"] = True
     st.rerun()
 
