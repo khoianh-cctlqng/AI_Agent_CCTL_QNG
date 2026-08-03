@@ -2866,62 +2866,91 @@ with st.sidebar:
         key=lambda item: (item.get("updated_at", ""), item["message_index"]),
         reverse=True,
     )
-    recent_questions = recent_questions[:20]
 
-    for history_item in recent_questions:
-        conversation_id = history_item["conversation_id"]
-        selected = conversation_id == database.get("active_id")
-        question_label = history_item["question"]
-        if len(question_label) > 46:
-            question_label = question_label[:45].rstrip() + "…"
+    # Chỉ hiển thị khoảng 9 nội dung gần nhất để danh sách gọn như ChatGPT.
+    recent_questions = recent_questions[:9]
 
-        col_open, col_delete = st.columns([5.8, 1])
-        with col_open:
-            if st.button(
-                question_label,
-                key=(
-                    f"open_question_{conversation_id}_"
-                    f"{history_item['message_index']}"
-                ),
-                use_container_width=True,
-                type="primary" if selected else "secondary",
-                help=history_item["question"],
-            ):
-                database["active_id"] = conversation_id
-                save_database(database)
-                st.session_state["history_focus_message_index"] = (
-                    history_item["message_index"]
-                )
-                st.rerun()
+    # Nền xám cho cả nút nội dung và nút xóa. Dùng container có key để CSS
+    # chỉ tác động đến khu vực lịch sử, không làm đổi các nút khác ở sidebar.
+    st.markdown(
+        """
+        <style>
+        .st-key-recent_question_list div[data-testid="stHorizontalBlock"] {
+            gap: 0.30rem;
+            align-items: stretch;
+            margin-bottom: 0.22rem;
+        }
+        .st-key-recent_question_list button {
+            min-height: 2.25rem;
+            border: 1px solid rgba(49, 51, 63, 0.16) !important;
+            border-radius: 0.55rem !important;
+            background: #ececec !important;
+            color: #252525 !important;
+            box-shadow: none !important;
+        }
+        .st-key-recent_question_list button:hover {
+            background: #dddddd !important;
+            border-color: rgba(49, 51, 63, 0.28) !important;
+        }
+        .st-key-recent_question_list button:focus {
+            box-shadow: 0 0 0 1px rgba(49, 51, 63, 0.20) !important;
+        }
+        .st-key-recent_question_list div[data-testid="column"]:first-child button {
+            justify-content: flex-start !important;
+            text-align: left !important;
+            padding-left: 0.70rem !important;
+        }
+        .st-key-recent_question_list div[data-testid="column"]:last-child button {
+            padding-left: 0.20rem !important;
+            padding-right: 0.20rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        with col_delete:
-            # Chỉ hiện nút xóa ở câu hỏi mới nhất của từng cuộc trò chuyện,
-            # tránh lặp nhiều nút thùng rác cho cùng một đoạn chat.
-            conversation_messages = database["conversations"][
-                conversation_id
-            ].get("messages", [])
-            latest_user_index = max(
-                (
-                    index
-                    for index, message in enumerate(conversation_messages)
-                    if message.get("role") == "user"
-                ),
-                default=-1,
-            )
-            if history_item["message_index"] == latest_user_index:
+    with st.container(key="recent_question_list"):
+        for history_item in recent_questions:
+            conversation_id = history_item["conversation_id"]
+            question_label = history_item["question"]
+            if len(question_label) > 44:
+                question_label = question_label[:43].rstrip() + "…"
+
+            col_open, col_delete = st.columns([6.2, 0.9])
+            with col_open:
+                if st.button(
+                    question_label,
+                    key=(
+                        f"open_question_{conversation_id}_"
+                        f"{history_item['message_index']}"
+                    ),
+                    use_container_width=True,
+                    type="secondary",
+                    help=history_item["question"],
+                ):
+                    database["active_id"] = conversation_id
+                    save_database(database)
+                    st.session_state["history_focus_message_index"] = (
+                        history_item["message_index"]
+                    )
+                    st.rerun()
+
+            with col_delete:
                 if st.button(
                     "🗑️",
-                    key=f"delete_{conversation_id}",
-                    help="Xóa toàn bộ cuộc trò chuyện này",
+                    key=(
+                        f"delete_question_row_{conversation_id}_"
+                        f"{history_item['message_index']}"
+                    ),
+                    help="Xóa toàn bộ cuộc trò chuyện chứa nội dung này",
                     use_container_width=True,
+                    type="secondary",
                 ):
                     database["conversations"].pop(conversation_id, None)
                     if database.get("active_id") == conversation_id:
                         database["active_id"] = None
                     save_database(database)
                     st.rerun()
-            else:
-                st.write("")
 
     st.divider()
     st.markdown("##### Chế độ trả lời")
