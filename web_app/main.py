@@ -2847,6 +2847,17 @@ with st.sidebar:
         selected = item["id"] == database["active_id"]
         col_open, col_delete = st.columns([5.8, 1])
 
+        # Lấy một đoạn nội dung trả lời gần nhất để người dùng dễ nhận biết
+        # cuộc trò chuyện cũ, thay vì chỉ nhìn thấy một dòng tiêu đề.
+        latest_answer = ""
+        for old_message in reversed(item.get("messages", [])):
+            if old_message.get("role") == "assistant":
+                latest_answer = " ".join(str(old_message.get("content", "")).split())
+                break
+
+        if len(latest_answer) > 96:
+            latest_answer = latest_answer[:95].rstrip() + "…"
+
         with col_open:
             if st.button(
                 item["title"],
@@ -2857,6 +2868,9 @@ with st.sidebar:
                 database["active_id"] = item["id"]
                 save_database(database)
                 st.rerun()
+
+            if latest_answer:
+                st.caption(latest_answer)
 
         with col_delete:
             if st.button(
