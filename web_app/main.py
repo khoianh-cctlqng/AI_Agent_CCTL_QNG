@@ -651,6 +651,13 @@ st.markdown(
 
     [data-testid="stAppViewContainer"] {
         background: #ffffff;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+    }
+
+    [data-testid="stMain"] {
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
     }
 
     [data-testid="stHeader"] {
@@ -3545,9 +3552,6 @@ else:
     if hidden_count > 0:
         st.caption(f"Đã ẩn {hidden_count} tin nhắn cũ để tăng tốc hiển thị.")
 
-    # Khi vừa hoàn tất một lượt hỏi - đáp, giữ câu hỏi mới nhất ở vùng giữa
-    # màn hình thay vì để ô chat cố định che khuất. Cờ này chỉ dùng một lần
-    # sau khi ứng dụng rerun để không giật màn hình khi người dùng tự cuộn.
     focus_latest_question = bool(
         st.session_state.get("focus_latest_question_after_rerun", False)
     )
@@ -3558,45 +3562,9 @@ else:
                 latest_user_absolute_index = absolute_index
                 break
 
-def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
-    """Đưa câu hỏi vừa gửi vào vùng giữa màn hình, tránh bị ô chat che."""
-    components.html(
-        f"""
-        <script>
-        const focusCurrentQuestion = () => {{
-            const parentDoc = window.parent.document;
-            const anchor = parentDoc.getElementById({anchor_id!r});
-            if (!anchor) return;
-
-            const main = parentDoc.querySelector(
-                '[data-testid="stMain"], section.main, .main'
-            );
-            const rect = anchor.getBoundingClientRect();
-            const viewportHeight = window.parent.innerHeight || 800;
-            const desiredTop = Math.max(110, viewportHeight * 0.30);
-            const delta = rect.top - desiredTop;
-
-            if (main && typeof main.scrollBy === "function") {{
-                main.scrollBy({{ top: delta, left: 0, behavior: "auto" }});
-            }} else {{
-                window.parent.scrollBy({{
-                    top: delta,
-                    left: 0,
-                    behavior: "auto"
-                }});
-            }}
-        }};
-
-        [40, 160, 420, 900, 1500].forEach((delay) => {{
-            setTimeout(focusCurrentQuestion, delay);
-        }});
-        </script>
-        """,
-        height=0,
+    visible_start_index = max(
+        0, len(conversation["messages"]) - len(visible_messages)
     )
-
-
-    visible_start_index = max(0, len(conversation["messages"]) - len(visible_messages))
 
     for message_index, message in enumerate(visible_messages):
         absolute_index = visible_start_index + message_index
@@ -3608,8 +3576,8 @@ def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
         ):
             st.markdown(
                 '<div id="current-question-anchor" '
-                'style="height:1px; scroll-margin-top:150px; '
-                'scroll-margin-bottom:320px;"></div>',
+                'style="height:1px; scroll-margin-top:120px; '
+                'scroll-margin-bottom:220px;"></div>',
                 unsafe_allow_html=True,
             )
 
@@ -3627,7 +3595,40 @@ def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
                 st.markdown(message["content"])
 
     if focus_latest_question and latest_user_absolute_index >= 0:
-        focus_current_question()
+        components.html(
+            """
+            <script>
+            const restoreAndFocus = () => {
+                const doc = window.parent.document;
+                const app = doc.querySelector('[data-testid="stAppViewContainer"]');
+                const main = doc.querySelector('[data-testid="stMain"]');
+
+                if (app) {
+                    app.style.overflowY = 'auto';
+                    app.style.overflowX = 'hidden';
+                }
+                if (main) {
+                    main.style.overflowY = 'auto';
+                    main.style.overflowX = 'hidden';
+                }
+
+                const anchor = doc.getElementById('current-question-anchor');
+                if (!anchor) return;
+
+                anchor.scrollIntoView({
+                    behavior: 'auto',
+                    block: 'center',
+                    inline: 'nearest'
+                });
+            };
+
+            // Chỉ căn một lần sau khi lịch sử đã dựng xong; không lặp liên tục
+            // để tránh cuộn quá đà và làm mất thanh cuộn.
+            setTimeout(restoreAndFocus, 180);
+            </script>
+            """,
+            height=0,
+        )
         st.session_state["focus_latest_question_after_rerun"] = False
 
 # Điều khiển vị trí cuộn:
@@ -3687,46 +3688,6 @@ if not conversation["messages"]:
         window.parent.addEventListener("pageshow", forceWelcomeTop, {
             once: true
         });
-        </script>
-        """,
-        height=0,
-    )
-
-
-def focus_current_question(anchor_id: str = "current-question-anchor") -> None:
-    """Đưa câu hỏi vừa gửi vào vùng giữa màn hình, tránh bị ô chat che."""
-    components.html(
-        f"""
-        <script>
-        const focusCurrentQuestion = () => {{
-            const parentDoc = window.parent.document;
-            const anchor = parentDoc.getElementById({anchor_id!r});
-            if (!anchor) return;
-
-            // Tính vị trí theo vùng cuộn chính của Streamlit thay vì cuộn sát đáy.
-            const main = parentDoc.querySelector(
-                '[data-testid="stMain"], section.main, .main'
-            );
-            const rect = anchor.getBoundingClientRect();
-            const viewportHeight = window.parent.innerHeight || 800;
-            const desiredTop = Math.max(110, viewportHeight * 0.30);
-            const delta = rect.top - desiredTop;
-
-            if (main && typeof main.scrollBy === "function") {{
-                main.scrollBy({{ top: delta, left: 0, behavior: "auto" }});
-            }} else {{
-                window.parent.scrollBy({{
-                    top: delta,
-                    left: 0,
-                    behavior: "auto"
-                }});
-            }}
-        }};
-
-        // Chạy nhiều lần vì nội dung trả lời/spinner có thể làm thay đổi chiều cao trang.
-        [40, 160, 420, 900, 1500].forEach((delay) => {{
-            setTimeout(focusCurrentQuestion, delay);
-        }});
         </script>
         """,
         height=0,
@@ -3833,8 +3794,6 @@ if question:
     )
     with st.chat_message("user", avatar="👤"):
         st.markdown(displayed_question)
-    focus_current_question()
-
     structured_table_answer = lookup_structured_table(
         database,
         question,
