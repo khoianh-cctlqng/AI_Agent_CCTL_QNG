@@ -1432,15 +1432,61 @@ def detect_requested_table_field(question: str) -> str:
     return ""
 
 
+def _resolve_structured_column(dataframe: Any, requested_field: str) -> str | None:
+    """Tìm đúng cột cần tra bằng tên chuẩn và các bí danh, không dựa vào vị trí cột."""
+    if requested_field in dataframe.columns:
+        return requested_field
+
+    aliases = TABLE_COLUMN_ALIASES.get(requested_field, []) + [requested_field]
+    normalized_aliases = {normalize_table_text(value) for value in aliases}
+
+    for column in dataframe.columns:
+        normalized_column = normalize_table_text(column)
+        if normalized_column in normalized_aliases:
+            return str(column)
+
+    return None
+
+
+def _person_match_score(question: str, person_name: Any) -> int:
+    """Chấm điểm tên người trong câu hỏi; ưu tiên khớp đủ họ tên, sau đó khớp cụm tên."""
+    normalized_question = normalize_table_text(question)
+    normalized_name = normalize_table_text(person_name)
+    if not normalized_name:
+        return 0
+
+    if normalized_name in normalized_question:
+        return 1000 + len(normalized_name)
+
+    name_tokens = [token for token in normalized_name.split() if len(token) >= 2]
+    question_tokens = set(normalized_question.split())
+    if not name_tokens:
+        return 0
+
+    matched_tokens = [token for token in name_tokens if token in question_tokens]
+    if not matched_tokens:
+        return 0
+
+    # Không tự nhận một người chỉ từ một từ quá phổ biến như họ hoặc tên đơn lẻ.
+    if len(name_tokens) >= 3 and len(matched_tokens) < 2:
+        return 0
+
+    # Cụm tên cuối thường là cách người dùng gọi tắt, ví dụ “Đoan Dung”.
+    tail_two = " ".join(name_tokens[-2:]) if len(name_tokens) >= 2 else name_tokens[-1]
+    tail_bonus = 200 if tail_two and tail_two in normalized_question else 0
+    coverage = int(100 * len(matched_tokens) / len(name_tokens))
+    return coverage + tail_bonus + len(matched_tokens) * 10
+
+
 def lookup_structured_table(
     database: dict[str, Any],
     question: str,
 ) -> str | None:
+    """Ưu tiên tra cứu dữ liệu có cấu trúc trước khi gọi Vector Store/OpenAI."""
     requested_field = detect_requested_table_field(question)
     if not requested_field or not database.get("table_files"):
         return None
 
-    normalized_question = normalize_table_text(question)
     matches: list[dict[str, Any]] = []
 
     for file_info in database.get("table_files", []):
@@ -1454,33 +1500,42 @@ def lookup_structured_table(
             continue
 
         for sheet_name, dataframe in sheets.items():
-            if (
-                "Họ và tên" not in dataframe.columns
-                or requested_field not in dataframe.columns
-            ):
+            if dataframe is None or getattr(dataframe, "empty", True):
                 continue
 
-            for row_index, raw_name in dataframe["Họ và tên"].items():
-                normalized_name = normalize_table_text(raw_name)
-                if not normalized_name or normalized_name not in normalized_question:
+            name_column = _resolve_structured_column(dataframe, "Họ và tên")
+            value_column = _resolve_structured_column(dataframe, requested_field)
+            if not name_column or not value_column:
+                continue
+
+            for row_index, raw_name in dataframe[name_column].items():
+                score = _person_match_score(question, raw_name)
+                if score <= 0:
                     continue
 
-                value = str(
-                    dataframe.at[row_index, requested_field]
-                ).strip()
-                if not value:
+                value = str(dataframe.at[row_index, value_column]).strip()
+                if not value or normalize_table_text(value) in {"nan", "none"}:
                     continue
 
                 matches.append(
                     {
                         "file": str(file_info.get("name", file_path.name)),
-                        "sheet": sheet_name,
-                        "row": int(row_index) + 2,
+                        "sheet": str(sheet_name),
+                        "row": int(row_index) + 1,
                         "person": str(raw_name).strip(),
                         "field": requested_field,
+                        "column": str(value_column),
                         "value": value,
+                        "score": score,
                     }
                 )
+
+    if not matches:
+        return None
+
+    # Chỉ giữ nhóm khớp tên tốt nhất để tránh chọn nhầm người có tên gần giống.
+    best_score = max(item["score"] for item in matches)
+    matches = [item for item in matches if item["score"] == best_score]
 
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
@@ -1488,35 +1543,39 @@ def lookup_structured_table(
         key = (
             item["file"],
             item["sheet"],
-            item["person"],
+            normalize_table_text(item["person"]),
             item["value"],
         )
         if key not in seen:
             seen.add(key)
             unique.append(item)
 
-    if not unique:
-        return None
-
     if len(unique) > 1:
-        options = "\n".join(
-            f"- {item['person']} — `{item['file']}`, "
-            f"sheet `{item['sheet']}`, hàng {item['row']}"
-            for item in unique[:8]
-        )
-        return (
-            "Tìm thấy nhiều bản ghi phù hợp nên chưa thể tự chọn.\n\n"
-            f"{options}\n\n"
-            "**Khuyến cáo kiểm tra:** Bổ sung ngày sinh hoặc đơn vị để "
-            "xác định đúng người."
-        )
+        people = {normalize_table_text(item["person"]) for item in unique}
+        values = {item["value"] for item in unique}
+
+        # Cùng một người, cùng một giá trị xuất hiện ở nhiều sheet/file: trả một kết quả.
+        if len(people) == 1 and len(values) == 1:
+            unique = [unique[0]]
+        else:
+            options = "\n".join(
+                f"- {item['person']} — `{item['file']}`, "
+                f"sheet `{item['sheet']}`, cột `{item['column']}`"
+                for item in unique[:8]
+            )
+            return (
+                "Tìm thấy nhiều bản ghi phù hợp nên chưa thể tự chọn.\n\n"
+                f"{options}\n\n"
+                "**Khuyến cáo kiểm tra:** Bổ sung ngày sinh, chức vụ hoặc đơn vị "
+                "để xác định đúng người."
+            )
 
     item = unique[0]
     return (
         f"**{item['field']} của {item['person']}:** {item['value']}\n\n"
         "**Nguồn bảng dữ liệu:**\n"
         f"- `{item['file']}` — sheet `{item['sheet']}`, "
-        f"hàng {item['row']}, cột `{item['field']}`."
+        f"cột `{item['column']}`."
     )
 
 
