@@ -2587,6 +2587,104 @@ def _is_explicit_infrastructure_query(question: str) -> bool:
     return any(term in normalized for term in technical_terms)
 
 
+
+
+def _is_explicit_personnel_table_query(question: str) -> bool:
+    """Nhận diện câu hỏi cần đọc kho bảng nhân sự, kể cả câu hỏi thống kê."""
+    normalized = normalize_table_text(question)
+    personnel_terms = (
+        "can bo", "cong chuc", "vien chuc", "nhan su", "nguoi lam viec",
+        "ly lich", "ho va ten", "ngay sinh", "ma ngach", "ma so",
+        "cccd", "bhxh", "bhyt", "dien thoai", "chuc vu", "chuc danh",
+        "trinh do", "bien che", "phong ban", "don vi cong tac",
+    )
+    aggregate_terms = (
+        "tong so nguoi", "bao nhieu nguoi", "so nguoi", "dem nguoi",
+        "tong so can bo", "tong so cong chuc", "tong so vien chuc",
+    )
+    return any(term in normalized for term in personnel_terms + aggregate_terms)
+
+
+def lookup_personnel_count(database: dict[str, Any], question: str) -> str | None:
+    """Đếm duy nhất cán bộ/công chức/viên chức trên toàn bộ file và sheet Excel."""
+    normalized = normalize_table_text(question)
+    count_terms = (
+        "tong so nguoi", "bao nhieu nguoi", "so nguoi", "dem nguoi",
+        "tong so can bo", "tong so cong chuc", "tong so vien chuc",
+    )
+    if not any(term in normalized for term in count_terms):
+        return None
+    if not database.get("table_files"):
+        return None
+
+    unique_people: dict[str, dict[str, Any]] = {}
+    scanned_sources: list[str] = []
+    for file_info in database.get("table_files", []):
+        file_path = resolve_table_path(file_info)
+        if not file_path.exists():
+            continue
+        try:
+            sheets = read_table_file_fast(file_path)
+        except Exception:
+            continue
+        for sheet_name, dataframe in sheets.items():
+            if dataframe is None or getattr(dataframe, "empty", True):
+                continue
+            name_column = _resolve_structured_column(dataframe, "Họ và tên")
+            if not name_column:
+                continue
+            scanned_sources.append(f"{file_info.get('name', file_path.name)} · {sheet_name}")
+            for row_index, raw_name in dataframe[name_column].items():
+                name = str(raw_name).strip()
+                norm_name = normalize_table_text(name)
+                if not norm_name or norm_name in {"nan", "none", "ho va ten", "ho ten"}:
+                    continue
+                # Loại dòng tiêu đề/tổng hợp và các chuỗi không giống tên người.
+                if len(norm_name.split()) < 2 or any(term in norm_name for term in (
+                    "danh sach", "tong cong", "nguoi lap", "thu truong", "ky ten"
+                )):
+                    continue
+                current = unique_people.get(norm_name)
+                if current is None or len(name) > len(str(current.get("name", ""))):
+                    unique_people[norm_name] = {
+                        "name": name,
+                        "file": str(file_info.get("name", file_path.name)),
+                        "sheet": str(sheet_name),
+                        "row": int(row_index) + 1,
+                    }
+
+    if not unique_people:
+        return None
+
+    source_lines = []
+    seen_sources = set()
+    for source in scanned_sources:
+        if source not in seen_sources:
+            seen_sources.add(source)
+            source_lines.append(f"- {source}")
+
+    return (
+        f"**Tổng số người xác định được trong kho dữ liệu dạng bảng: {len(unique_people)} người.**\n\n"
+        "Kết quả đã được đếm theo **họ và tên duy nhất** trên tất cả file và tất cả sheet có cột Họ và tên; "
+        "các bản ghi trùng giữa nhiều bảng chỉ tính một lần.\n\n"
+        "**Nguồn bảng đã đọc:**\n" + "\n".join(source_lines[:20])
+    )
+
+
+def _must_prefer_structured_table(question: str) -> bool:
+    """Các câu hỏi dạng số liệu/bảng phải ưu tiên kết quả Excel, không để RAG văn bản ghi đè."""
+    normalized = normalize_table_text(question)
+    table_terms = (
+        "thong ke", "danh sach", "tong so", "bao nhieu", "so lieu",
+        "thong so ky thuat", "dung tich", "muc nuoc", "cao trinh",
+        "ma ngach", "ma so", "cccd", "bhxh", "bhyt", "dien thoai",
+    )
+    return (
+        _is_explicit_infrastructure_query(question)
+        or _is_explicit_personnel_table_query(question)
+        or any(term in normalized for term in table_terms)
+    )
+
 def lookup_structured_table(
     database: dict[str, Any],
     question: str,
@@ -2594,12 +2692,18 @@ def lookup_structured_table(
     """Định tuyến theo đối tượng: công trình trước nếu câu hỏi nêu rõ hồ/đập/đê..."""
     explicit_infrastructure = _is_explicit_infrastructure_query(question)
 
+    personnel_count_answer = lookup_personnel_count(database, question)
+    if personnel_count_answer:
+        return personnel_count_answer
+
     # Khi câu hỏi có “hồ chứa”, “đập”, “thông số kỹ thuật”, “dung tích”...
     # tuyệt đối không dò bảng lý lịch trước, vì “Hồ” có thể bị hiểu nhầm là họ người.
     if explicit_infrastructure:
         infrastructure_answer = lookup_infrastructure_table(database, question)
         if infrastructure_answer:
             return infrastructure_answer
+        # Không được rơi sang bảng nhân sự khi người dùng đang hỏi công trình.
+        return None
 
     person_profile_answer = lookup_person_profile(database, question)
     if person_profile_answer:
@@ -4766,8 +4870,9 @@ if question:
     structured_table_answer = lookup_structured_table(database, table_question)
     has_document_repository = bool(database.get("uploaded_files"))
 
-    # Chỉ trả thẳng từ bảng khi thực tế chưa có tài liệu dùng chung để đối chiếu.
-    if structured_table_answer and not has_document_repository:
+    # Câu hỏi số liệu/bảng phải dùng trực tiếp kết quả Excel; không để RAG văn bản ghi đè.
+    prefer_structured_table = _must_prefer_structured_table(question)
+    if structured_table_answer and (prefer_structured_table or not has_document_repository):
         answer = structured_table_answer
         with st.chat_message("assistant", avatar="💧"):
             render_assistant_content(answer)
