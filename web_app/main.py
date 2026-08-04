@@ -2283,14 +2283,56 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
     }
 
     def canonical_label(raw_label: str) -> str:
+        """Chuẩn hóa nhãn cột theo thứ tự ưu tiên, không để 'Ngày cấp CCCD' rơi vào cột CCCD."""
         cleaned = clean_person_column_label(raw_label)
         normalized = normalize_table_text(cleaned)
+
+        # 1) So khớp chính xác trước. Đây là bước bắt buộc với các cột có từ khóa
+        #    chồng lấn như CCCD / Ngày cấp CCCD và Mã ngạch / Mã số.
+        exact_map: dict[str, str] = {}
         for canonical, aliases in canonical_aliases.items():
-            if normalized == normalize_table_text(canonical):
-                return canonical
-            if any(normalized == alias or normalized.endswith(" " + alias) for alias in aliases):
-                return canonical
+            exact_map[normalize_table_text(canonical)] = canonical
+            for alias in aliases:
+                exact_map[normalize_table_text(alias)] = canonical
+        if normalized in exact_map:
+            return exact_map[normalized]
+
+        # 2) Nhận diện các tiêu đề nhiều tầng có tiền tố. Chỉ dùng bí danh đủ dài,
+        #    tuyệt đối không dùng từ ngắn chung chung như 'cccd', 'ma so'.
+        candidates: list[tuple[int, str]] = []
+        for canonical, aliases in canonical_aliases.items():
+            for alias in aliases:
+                alias_norm = normalize_table_text(alias)
+                if len(alias_norm) < 8:
+                    continue
+                if normalized.endswith(" " + alias_norm) or normalized.startswith(alias_norm + " "):
+                    candidates.append((len(alias_norm), canonical))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
         return cleaned
+
+    def value_matches_field(label: str, value: str) -> bool:
+        """Chặn giá trị bị lệch cột do ô gộp/tiêu đề nhiều tầng."""
+        compact = re.sub(r"\s+", "", str(value).strip())
+        normalized_value = normalize_table_text(value)
+        if not compact or normalized_value in {"nan", "none"}:
+            return False
+
+        if label == "Số căn cước công dân":
+            digits = re.sub(r"\D", "", compact)
+            # CMND cũ 9 số hoặc CCCD 12 số. Không nhận ngày tháng.
+            return len(digits) in {9, 12} and not re.search(r"[./-]", compact)
+        if label == "Ngày cấp CCCD" or label == "Ngày sinh" or label == "Ngày vào Đảng":
+            return bool(re.search(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", compact))
+        if label == "Mã ngạch/mã số chức danh nghề nghiệp":
+            # Ví dụ V.05.02.07 hoặc 01.003; tránh nhận mã số nhân sự thuần số ngắn.
+            return bool(re.search(r"[A-Za-z]", compact)) or compact.count(".") >= 2
+        if label == "Mã số":
+            return bool(re.fullmatch(r"[A-Za-z0-9./-]{2,30}", compact))
+        if label in {"Số sổ BHXH", "Số thẻ BHYT", "Điện thoại liên lạc"}:
+            return len(re.sub(r"\D", "", compact)) >= 6
+        return True
 
     # field -> value -> list sources. Dùng cấu trúc này để phát hiện xung đột.
     merged: dict[str, dict[str, list[str]]] = {}
@@ -2304,7 +2346,7 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
             if label_norm in {"", "stt", "tt"}:
                 continue
             value = str(raw_value).strip()
-            if not value or normalize_table_text(value) in {"nan", "none"}:
+            if not value_matches_field(label, value):
                 continue
             merged.setdefault(label, {}).setdefault(value, []).append(source)
 
@@ -2324,24 +2366,28 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
         if label not in ordered_labels:
             ordered_labels.append(label)
 
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     conflict_notes: list[str] = []
     for label in ordered_labels:
         values_map = merged[label]
         values = list(values_map.keys())
         if len(values) == 1:
             display_value = values[0]
+            field_sources = list(dict.fromkeys(values_map[values[0]]))
         else:
-            # Không tự chọn khi nhiều bảng có giá trị khác nhau.
+            # Không ghép hai giá trị khác loại vào cùng một ô. Hiển thị rõ để đối chiếu.
             display_value = " / ".join(values)
+            field_sources = list(dict.fromkeys(
+                source for value in values for source in values_map[value]
+            ))
             conflict_notes.append(
                 f"- **{label}** có {len(values)} giá trị khác nhau: " + "; ".join(values)
             )
-        rows.append((label, display_value))
+        rows.append((label, display_value, "<br>".join(field_sources)))
 
     table = "\n".join(
-        f"| {index} | {label} | {value} |"
-        for index, (label, value) in enumerate(rows, start=1)
+        f"| {index} | {label} | {value} | {sources} |"
+        for index, (label, value, sources) in enumerate(rows, start=1)
     )
 
     unique_sources = list(dict.fromkeys(source_rows))
@@ -2354,7 +2400,8 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
 
     return (
         f"**{person_name}**\n\n"
-        "| STT | Nội dung | Thông tin |\n|---:|---|---|\n"
+        "| STT | Nội dung | Thông tin | Nguồn (file — sheet — dòng) |\n"
+        "|---:|---|---|---|\n"
         f"{table}"
         f"{conflict_block}\n\n"
         "**Nguồn bảng dữ liệu đã JOIN:**\n"
