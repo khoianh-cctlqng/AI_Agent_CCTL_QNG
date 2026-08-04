@@ -2610,6 +2610,158 @@ def enrich_table_question_with_recent_context(
     return question + "\nNgữ cảnh câu hỏi trước của người dùng: " + " | ".join(previous_user_texts)
 
 
+
+
+def question_prefers_table_data(question: str) -> bool:
+    """Nhận diện câu hỏi cần ưu tiên kho dữ liệu dạng bảng.
+
+    Không phụ thuộc việc người dùng có gõ đúng tên cột. Các câu hỏi về số liệu,
+    danh sách, thống kê, hồ sơ cá nhân và thông số công trình phải tra Excel/CSV
+    trước khi dùng kho văn bản.
+    """
+    normalized = normalize_table_text(question)
+    table_terms = (
+        "thong ke", "so lieu", "danh sach", "bao nhieu", "tong so", "so luong",
+        "thong so", "ky thuat", "dung tich", "dien tich", "cao trinh", "muc nuoc",
+        "luu luong", "cong suat", "chieu dai", "chieu cao", "nam xay dung", "nam ht",
+        "ho chua", "dap", "de", "ke", "mo han", "kenh", "tram bom", "cong trinh",
+        "ho va ten", "ngay sinh", "que quan", "chuc vu", "cccd", "bhxh", "bhyt",
+        "dien thoai", "ma ngach", "ma so", "ly lich", "thong tin ve", "du lieu ve",
+    )
+    return any(term in normalized for term in table_terms)
+
+
+def _meaningful_question_terms(question: str) -> list[str]:
+    """Lấy cụm từ có ý nghĩa để dò trực tiếp trong mọi ô Excel khi tiêu đề lỗi."""
+    normalized = normalize_table_text(question)
+    stop_words = {
+        "cho", "toi", "xin", "hay", "ve", "cua", "trong", "kho", "du lieu",
+        "thong tin", "thong ke", "ky thuat", "thong so", "day du", "liet ke",
+        "danh sach", "bao nhieu", "cac", "nhung", "mot", "file", "bang",
+    }
+    # Ưu tiên cụm tên riêng/công trình sau các từ khóa thường dùng.
+    patterns = (
+        r"(?:ho chua|ho|dap|de|ke|kenh|tram bom|cong trinh)\s+(.+)$",
+        r"(?:ve|cua)\s+(.+)$",
+    )
+    terms: list[str] = []
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            candidate = " ".join(
+                token for token in match.group(1).split()
+                if token not in stop_words and len(token) > 1
+            ).strip()
+            if len(candidate) >= 3:
+                terms.append(candidate)
+
+    tokens = [
+        token for token in normalized.split()
+        if len(token) >= 3 and token not in stop_words
+    ]
+    # Thêm các cụm 2-4 từ để bắt tên như “nuoc trong”, “ho khoi anh”.
+    for size in (4, 3, 2):
+        for index in range(max(0, len(tokens) - size + 1)):
+            phrase = " ".join(tokens[index:index + size])
+            if phrase and phrase not in terms:
+                terms.append(phrase)
+    for token in tokens:
+        if token not in terms:
+            terms.append(token)
+    return terms[:20]
+
+
+def lookup_raw_table_rows(database: dict[str, Any], question: str) -> str | None:
+    """Dự phòng tra mọi ô trong tất cả file/sheet Excel.
+
+    Hàm này xử lý các file có tiêu đề nhiều tầng hoặc tên cột chưa chuẩn hóa:
+    tìm cụm tên trong toàn bộ hàng, rồi trả lại mọi ô có giá trị của đúng hàng.
+    """
+    if not database.get("table_files"):
+        return None
+    terms = _meaningful_question_terms(question)
+    if not terms:
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    for file_info in database.get("table_files", []):
+        file_path = resolve_table_path(file_info)
+        if not file_path.exists():
+            continue
+        try:
+            sheets = read_table_file_fast(file_path)
+        except Exception:
+            continue
+
+        for sheet_name, dataframe in sheets.items():
+            if dataframe is None or getattr(dataframe, "empty", True):
+                continue
+            for row_index, row in dataframe.iterrows():
+                values = [str(value).strip() for value in row.tolist()]
+                normalized_values = [normalize_table_text(value) for value in values]
+                row_text = " | ".join(value for value in normalized_values if value)
+                if not row_text:
+                    continue
+                matched = [term for term in terms if term and term in row_text]
+                if not matched:
+                    continue
+                # Tên/cụm dài khớp được ưu tiên mạnh hơn từ đơn lẻ.
+                score = max(len(term.split()) * 20 + len(term) for term in matched)
+                non_empty_count = sum(bool(value) and normalize_table_text(value) not in {"nan", "none"} for value in values)
+                candidates.append({
+                    "score": score,
+                    "file": str(file_info.get("name", file_path.name)),
+                    "sheet": str(sheet_name),
+                    "row": int(row_index) + 1,
+                    "dataframe": dataframe,
+                    "row_index": row_index,
+                    "non_empty": non_empty_count,
+                })
+
+    if not candidates:
+        return None
+    best_score = max(item["score"] for item in candidates)
+    best = [item for item in candidates if item["score"] == best_score]
+    # Ưu tiên hàng có nhiều thông tin nhất; giữ tối đa 5 hàng nếu có nhiều nguồn.
+    best.sort(key=lambda item: item["non_empty"], reverse=True)
+    best = best[:5]
+
+    result_blocks: list[str] = []
+    for item in best:
+        dataframe = item["dataframe"]
+        row = dataframe.loc[item["row_index"]]
+        rows: list[str] = []
+        seen_labels: set[str] = set()
+        for column, raw_value in row.items():
+            value = re.sub(r"\s+", " ", str(raw_value or "")).strip()
+            if not value or normalize_table_text(value) in {"nan", "none"}:
+                continue
+            label = re.sub(r"\s+", " ", str(column or "Nội dung")).strip()
+            normalized_label = normalize_table_text(label)
+            if normalized_label.startswith("cot "):
+                label = "Nội dung"
+            # Không lặp chính xác cùng nhãn–giá trị do tiêu đề ô gộp.
+            key = normalize_table_text(label + " " + value)
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
+            rows.append(f"| {label} | {value} |")
+
+        if not rows:
+            continue
+        result_blocks.append(
+            "| Nội dung | Thông tin |\n|---|---|\n"
+            + "\n".join(rows[:35])
+            + "\n\n**Nguồn bảng dữ liệu:**\n"
+            + f"- `{item['file']}` — sheet `{item['sheet']}`, dòng dữ liệu {item['row']}."
+        )
+
+    if not result_blocks:
+        return None
+    if len(result_blocks) == 1:
+        return result_blocks[0]
+    return "Tìm thấy dữ liệu phù hợp trong nhiều bảng:\n\n" + "\n\n---\n\n".join(result_blocks)
+
 def lookup_structured_table(
     database: dict[str, Any],
     question: str,
@@ -2653,6 +2805,12 @@ def lookup_structured_table(
     infrastructure_answer = lookup_infrastructure_table(database, question)
     if infrastructure_answer:
         return infrastructure_answer
+
+    # Dự phòng bắt buộc: nếu bộ nhận diện tên cột/công trình chưa khớp,
+    # vẫn dò trực tiếp mọi ô trong tất cả file và sheet Excel.
+    raw_table_answer = lookup_raw_table_rows(database, question)
+    if raw_table_answer:
+        return raw_table_answer
 
     requested_field = detect_requested_table_field(question)
     if not requested_field or not database.get("table_files"):
@@ -4778,8 +4936,13 @@ if question:
     structured_table_answer = lookup_structured_table(database, table_question)
     has_document_repository = bool(database.get("uploaded_files"))
 
-    # Chỉ trả thẳng từ bảng khi thực tế chưa có tài liệu dùng chung để đối chiếu.
-    if structured_table_answer and not has_document_repository:
+    # Với câu hỏi mang tính số liệu/thống kê/thông số, kết quả Excel là nguồn
+    # ưu tiên và được trả trực tiếp. Không để RAG văn bản ghi đè bằng câu
+    # “chưa đủ căn cứ” khi kho bảng đã tìm thấy đúng hàng dữ liệu.
+    direct_table_answer = bool(structured_table_answer) and (
+        question_prefers_table_data(question) or not has_document_repository
+    )
+    if direct_table_answer:
         answer = structured_table_answer
         with st.chat_message("assistant", avatar="💧"):
             render_assistant_content(answer)
