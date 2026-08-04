@@ -1312,6 +1312,16 @@ TABLE_COLUMN_ALIASES: dict[str, list[str]] = {
         "bao hiem y te", "bảo hiểm y tế",
     ],
     "Số điện thoại": ["dien thoai", "điện thoại", "so dien thoai", "sdt"],
+    "Mã ngạch": [
+        "ma ngach", "mã ngạch", "ngach", "ngạch",
+        "ma ngach vien chuc", "mã ngạch viên chức",
+        "ma ngach cong chuc", "mã ngạch công chức",
+    ],
+    "Mã số": [
+        "ma so", "mã số", "ma so chuc danh", "mã số chức danh",
+        "ma so chuc danh nghe nghiep", "mã số chức danh nghề nghiệp",
+        "ma so ngach", "mã số ngạch", "ma so vien chuc", "mã số viên chức",
+    ],
     "STT": ["stt", "tt", "số thứ tự", "so thu tu"],
     "Tên công trình": [
         "tên công trình", "ten cong trinh", "tên ct", "ten ct",
@@ -2040,6 +2050,14 @@ def detect_requested_table_field(question: str) -> str:
             "trinh do llct", "ly luan chinh tri", "llct",
         ],
         "Ngày vào Đảng": ["ngay vao dang", "vao dang"],
+        "Mã ngạch": [
+            "ma ngach", "ngach vien chuc", "ngach cong chuc",
+            "ma ngach vien chuc", "ma ngach cong chuc",
+        ],
+        "Mã số": [
+            "ma so", "ma so chuc danh", "ma so chuc danh nghe nghiep",
+            "ma so ngach", "ma so vien chuc",
+        ],
     }
     # Ưu tiên cụm dài để tránh từ ngắn khớp nhầm.
     for field, terms in mapping.items():
@@ -2151,6 +2169,7 @@ def is_person_profile_query(question: str) -> bool:
         "du lieu cua", "du lieu", "ho so", "ly lich", "ngay sinh",
         "chuc vu", "chuc danh", "que quan", "trinh do", "cccd",
         "bhxh", "bhyt", "dien thoai", "so lien lac", "vao dang",
+        "ma ngach", "ma so", "ngach vien chuc", "ma so chuc danh",
     )
     return any(term in normalized for term in person_terms)
 
@@ -2216,7 +2235,7 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
         "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
         "Trình độ chuyên môn", "Trình độ LLCT", "Ngày vào Đảng",
         "CCCD", "Ngày cấp CCCD", "Số sổ BHXH", "Số thẻ BHYT",
-        "Số điện thoại liên lạc", "Số điện thoại",
+        "Số điện thoại liên lạc", "Số điện thoại", "Mã ngạch", "Mã số",
     ]
 
     def clean_person_column_label(label: str) -> str:
@@ -2259,6 +2278,41 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
         f"{table}\n\n"
         f"**Nguồn bảng dữ liệu:** `{item['file']}` — sheet `{item['sheet']}` — dòng {item['row']}."
     )
+
+def enrich_table_question_with_recent_context(
+    database: dict[str, Any],
+    conversation_id: str,
+    question: str,
+) -> str:
+    """
+    Bổ sung tên người từ các câu hỏi người dùng gần nhất cho câu hỏi nối tiếp
+    như “bổ sung mã ngạch và mã số vào bảng trên”. Chỉ dùng lời người dùng,
+    không dùng câu trả lời cũ của Agent.
+    """
+    normalized = normalize_table_text(question)
+    follow_up_terms = (
+        "bang tren", "bo sung", "them thong tin", "thong tin tren",
+        "nguoi nay", "nguoi do", "ho so tren", "ma ngach", "ma so",
+    )
+    if not any(term in normalized for term in follow_up_terms):
+        return question
+
+    conversation = database.get("conversations", {}).get(conversation_id, {})
+    messages = conversation.get("messages", [])
+    previous_user_texts: list[str] = []
+    for message in reversed(messages[:-1]):
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content", "")).strip()
+        if content:
+            previous_user_texts.append(content)
+        if len(previous_user_texts) >= 3:
+            break
+
+    if not previous_user_texts:
+        return question
+    return question + "\nNgữ cảnh câu hỏi trước của người dùng: " + " | ".join(previous_user_texts)
+
 
 def lookup_structured_table(
     database: dict[str, Any],
@@ -4403,7 +4457,12 @@ if question:
     # Tra cứu song song cả kho bảng và kho tài liệu dùng chung.
     # Kho bảng cung cấp dữ liệu có cấu trúc; kho tài liệu cung cấp căn cứ,
     # mô tả và nội dung văn bản. Không dừng sớm khi mới tìm thấy một kho.
-    structured_table_answer = lookup_structured_table(database, question)
+    table_question = enrich_table_question_with_recent_context(
+        database,
+        conversation_id,
+        question,
+    )
+    structured_table_answer = lookup_structured_table(database, table_question)
     has_document_repository = bool(database.get("uploaded_files"))
 
     # Chỉ trả thẳng từ bảng khi thực tế chưa có tài liệu dùng chung để đối chiếu.
