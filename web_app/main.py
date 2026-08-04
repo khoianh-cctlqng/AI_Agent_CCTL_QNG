@@ -3164,18 +3164,19 @@ conversation = get_active_conversation(database)
 # =========================================================
 # SIDEBAR TRÁI
 # =========================================================
-# CSS riêng cho hai nút nạp dữ liệu của Streamlit.
-# Nút gốc của st.file_uploader dùng chữ “Upload”; CSS dưới đây
-# thay phần hiển thị bằng mũi tên hướng lên màu xanh và tiếng Việt.
+# CSS cho vùng chọn tệp của Streamlit.
+# Chỉ Việt hóa nút CHỌN TỆP trong vùng thả tệp; không tác động
+# đến nút dấu X dùng để bỏ tệp đã chọn. Nút “Nạp dữ liệu vào kho”
+# thật sự được giữ riêng ở bên dưới và chỉ xuất hiện khi đã chọn tệp.
 st.markdown(
     """
     <style>
-    /* Việt hóa chắc chắn nút chọn tệp của cả hai kho. */
-    [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploader"] button {
+    /* Chỉ chỉnh nút chọn tệp trong dropzone, tuyệt đối không áp dụng
+       cho các nút xóa tệp đã chọn nằm bên trong stFileUploader. */
+    [data-testid="stFileUploaderDropzone"] button {
         position: relative !important;
-        min-width: 13.4rem !important;
-        height: 2.45rem !important;
+        min-width: 8.8rem !important;
+        height: 2.35rem !important;
         color: transparent !important;
         font-size: 0 !important;
         border: 1px solid rgba(49, 51, 63, 0.20) !important;
@@ -3185,38 +3186,32 @@ st.markdown(
         overflow: hidden !important;
     }
 
-    /* Streamlit đặt chữ Upload trong p/span/div và icon trong svg.
-       Ẩn toàn bộ phần tử con để chữ tiếng Anh không còn lộ ra. */
-    [data-testid="stFileUploaderDropzone"] button *,
-    [data-testid="stFileUploader"] button * {
+    [data-testid="stFileUploaderDropzone"] button * {
         visibility: hidden !important;
         opacity: 0 !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button::before,
-    [data-testid="stFileUploader"] button::before {
-        content: "↑" !important;
+    [data-testid="stFileUploaderDropzone"] button::before {
+        content: "＋" !important;
         visibility: visible !important;
         opacity: 1 !important;
         position: absolute !important;
-        left: 0.82rem !important;
+        left: 0.78rem !important;
         top: 50% !important;
         transform: translateY(-53%) !important;
         color: #1976d2 !important;
-        font-size: 1.25rem !important;
-        font-weight: 800 !important;
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
         line-height: 1 !important;
-        z-index: 2 !important;
         pointer-events: none !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button::after,
-    [data-testid="stFileUploader"] button::after {
-        content: "Nạp dữ liệu vào kho" !important;
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "Chọn tệp" !important;
         visibility: visible !important;
         opacity: 1 !important;
         position: absolute !important;
-        left: 2.15rem !important;
+        left: 2.05rem !important;
         top: 50% !important;
         transform: translateY(-50%) !important;
         color: #262730 !important;
@@ -3224,14 +3219,22 @@ st.markdown(
         font-weight: 500 !important;
         line-height: 1 !important;
         white-space: nowrap !important;
-        z-index: 2 !important;
         pointer-events: none !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button:hover,
-    [data-testid="stFileUploader"] button:hover {
+    [data-testid="stFileUploaderDropzone"] button:hover {
         background: #f5f7fa !important;
         border-color: rgba(25, 118, 210, 0.45) !important;
+    }
+
+    /* Giữ nguyên nút bỏ tệp của Streamlit, hiển thị dạng dấu X màu xám. */
+    [data-testid="stFileUploader"] button[kind="icon"],
+    [data-testid="stFileUploader"] [data-testid="stBaseButton-headerNoPadding"] {
+        color: #6b7280 !important;
+        background: transparent !important;
+        border: 0 !important;
+        min-width: auto !important;
+        box-shadow: none !important;
     }
     </style>
     """,
