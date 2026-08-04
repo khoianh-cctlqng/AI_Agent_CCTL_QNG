@@ -1874,8 +1874,23 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
                     if detected_row_types:
                         row_type = detected_row_types[0]
 
-                if requested_types != ["Công trình"] and row_type not in requested_types:
+                # Không loại sớm các dòng có loại suy luận chung là "Công trình".
+                # Nhiều bảng hồ/đập dùng cột "Tên công trình" và sheet tên chung,
+                # nên loại cụ thể chỉ xác định được từ câu hỏi + tên dòng.
+                normalized_name = normalize_table_text(name)
+                name_is_asked = bool(normalized_name and normalized_name in normalized_question)
+                generic_row_type = row_type in {"", "Công trình", None}
+                if (
+                    requested_types != ["Công trình"]
+                    and row_type not in requested_types
+                    and not (generic_row_type and name_is_asked)
+                ):
                     continue
+
+                # Khi người dùng hỏi rõ một loại công trình và dòng khớp chính xác tên,
+                # dùng loại trong câu hỏi để tránh trả nhãn chung "công trình".
+                if generic_row_type and name_is_asked and requested_types != ["Công trình"]:
+                    row_type = requested_types[0]
 
                 row_values = {
                     str(column): str(dataframe.at[row_index, column]).strip()
@@ -1893,30 +1908,10 @@ def lookup_infrastructure_table(database: dict[str, Any], question: str) -> str 
                 })
 
     if not records:
-        type_text = ", ".join(requested_types).lower()
-        loaded_sources: list[str] = []
-        for file_info in database.get("table_files", []):
-            file_path = resolve_table_path(file_info)
-            if not file_path.exists():
-                continue
-            try:
-                sheets = read_table_file_fast(file_path)
-            except Exception:
-                continue
-            for sheet_name, dataframe in sheets.items():
-                columns = ", ".join(str(column) for column in list(dataframe.columns)[:8])
-                loaded_sources.append(
-                    f"- `{file_info.get('name', file_path.name)}` — sheet `{sheet_name}` "
-                    f"({len(dataframe)} dòng; cột: {columns or 'chưa nhận diện'})"
-                )
-        diagnostic = "\n".join(loaded_sources[:8])
-        return (
-            f"Chưa tìm thấy dữ liệu **{type_text}** trong kho bảng dữ liệu.\n\n"
-            "**Chẩn đoán bảng đã đọc:**\n"
-            f"{diagnostic or '- Chưa đọc được sheet dữ liệu nào.'}\n\n"
-            "**Khuyến cáo kiểm tra:** Xóa bản bảng cũ, nạp lại file sau khi "
-            "ứng dụng cập nhật để hệ thống đọc lại toàn bộ ô gộp và tiêu đề nhiều tầng."
-        )
+        # Không đưa metadata/chẩn đoán kỹ thuật ra câu trả lời thông thường.
+        # Phần chẩn đoán chỉ hiển thị khi người dùng chủ động mở nút
+        # "Chẩn đoán kho dữ liệu dạng bảng" ở thanh bên.
+        return None
 
     # Loại trùng cùng tên, cùng loại trong cùng nguồn.
     unique: list[dict[str, Any]] = []
