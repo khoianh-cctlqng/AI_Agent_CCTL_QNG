@@ -2175,7 +2175,14 @@ def is_person_profile_query(question: str) -> bool:
 
 
 def lookup_person_profile(database: dict[str, Any], question: str) -> str | None:
-    """Tra cứu hồ sơ người theo cột Họ và tên, không nhầm họ Hồ với hồ chứa."""
+    """
+    Tra cứu và JOIN hồ sơ người trên toàn bộ file/sheet theo họ tên.
+
+    Không dừng ở bản ghi đầu tiên. Các trường nằm ở nhiều bảng khác nhau
+    (ví dụ lý lịch ở file A, mã ngạch/mã số ở file B) được hợp nhất thành
+    một hồ sơ duy nhất. Khi có xung đột dữ liệu, hệ thống hiển thị rõ từng
+    giá trị và nguồn thay vì tự chọn một giá trị.
+    """
     if not is_person_profile_query(question) or not database.get("table_files"):
         return None
 
@@ -2195,10 +2202,12 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
             name_column = _resolve_structured_column(dataframe, "Họ và tên")
             if not name_column:
                 continue
+
             for row_index, raw_name in dataframe[name_column].items():
                 score = _person_match_score(question, raw_name)
                 if score <= 0:
                     continue
+
                 values: dict[str, str] = {}
                 for column in dataframe.columns:
                     value = str(dataframe.at[row_index, column]).strip()
@@ -2208,35 +2217,37 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
                     if normalize_table_text(label) in {"stt", "tt"}:
                         continue
                     values[label] = value
+
                 matches.append({
                     "file": str(file_info.get("name", file_path.name)),
                     "sheet": str(sheet_name),
                     "row": int(row_index) + 1,
                     "person": str(raw_name).strip(),
+                    "person_key": normalize_table_text(raw_name),
                     "score": score,
                     "values": values,
                 })
 
     if not matches:
         return None
+
     matches.sort(key=lambda item: item["score"], reverse=True)
     best_score = matches[0]["score"]
     best = [item for item in matches if item["score"] == best_score]
-    unique_people = {normalize_table_text(item["person"]) for item in best}
-    if len(unique_people) > 1:
+
+    # Nếu có nhiều người khác nhau cùng đạt mức khớp cao nhất thì không tự JOIN.
+    person_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in best:
+        person_groups.setdefault(item["person_key"], []).append(item)
+    if len(person_groups) > 1:
         names = sorted({item["person"] for item in best})
         return (
-            "Tìm thấy nhiều người có tên gần giống. Vui lòng nhập đầy đủ họ và tên:\n- "
-            + "\n- ".join(names[:10])
+            "Tìm thấy nhiều người có tên gần giống. Vui lòng nhập đầy đủ họ và tên "
+            "hoặc bổ sung ngày sinh/CCCD:\n- " + "\n- ".join(names[:10])
         )
 
-    item = best[0]
-    preferred_fields = [
-        "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
-        "Trình độ chuyên môn", "Trình độ LLCT", "Ngày vào Đảng",
-        "CCCD", "Ngày cấp CCCD", "Số sổ BHXH", "Số thẻ BHYT",
-        "Số điện thoại liên lạc", "Số điện thoại", "Mã ngạch", "Mã số",
-    ]
+    records = next(iter(person_groups.values()))
+    person_name = records[0]["person"]
 
     def clean_person_column_label(label: str) -> str:
         """Bỏ tiền tố tên bảng bị ghép dư vào nhãn cột nhân sự."""
@@ -2246,37 +2257,108 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
             cleaned = cleaned.rsplit(" - ", 1)[-1].strip()
         return cleaned
 
-    rows: list[tuple[str, str]] = []
-    used: set[str] = set()
-    for requested in preferred_fields:
-        requested_norm = normalize_table_text(requested)
-        for column, value in item["values"].items():
-            clean_column = clean_person_column_label(column)
-            column_norm = normalize_table_text(clean_column)
-            # Chấp nhận cả nhãn chuẩn và nhãn từng bị ghép tiền tố tên bảng.
-            if column_norm == requested_norm or column_norm.endswith(" " + requested_norm):
-                rows.append((requested, value))
-                used.add(column)
-                break
+    # Quy các biến thể tên cột về cùng một trường để JOIN được giữa nhiều bảng.
+    canonical_aliases: dict[str, tuple[str, ...]] = {
+        "Họ và tên": ("ho va ten", "ho ten", "ten can bo"),
+        "Ngày sinh": ("ngay sinh", "ngay thang nam sinh"),
+        "Chức vụ": ("chuc vu", "chuc danh"),
+        "Quê quán": ("que quan",),
+        "Số căn cước công dân": ("so can cuoc cong dan", "cccd", "so cccd"),
+        "Trình độ chuyên môn": ("trinh do chuyen mon",),
+        "Trình độ LLCT": ("trinh do llct", "ly luan chinh tri"),
+        "Ngày vào Đảng": ("ngay vao dang",),
+        "Ngày cấp CCCD": ("ngay cap cccd", "ngay cap can cuoc"),
+        "Số sổ BHXH": ("so so bhxh", "so bhxh"),
+        "Số thẻ BHYT": ("so the bhyt", "so bhyt"),
+        "Điện thoại liên lạc": ("dien thoai lien lac", "so dien thoai", "dien thoai"),
+        "Mã ngạch/mã số chức danh nghề nghiệp": (
+            "ma ngach ma so chuc danh nghe nghiep",
+            "ma ngach ma so chuc danh",
+            "ma ngach chuc danh nghe nghiep",
+            "ma ngach",
+        ),
+        "Mã số": ("ma so", "ma so can bo", "ma so vien chuc"),
+        "Phòng ban, đơn vị công tác": ("phong ban don vi cong tac", "don vi cong tac", "phong ban"),
+        "Đơn vị công tác": ("don vi cong tac",),
+    }
 
-    for column, value in item["values"].items():
-        if column in used or len(rows) >= 14:
-            continue
-        clean_column = clean_person_column_label(column)
-        clean_norm = normalize_table_text(clean_column)
-        if clean_norm in {"", "stt", "tt"}:
-            continue
-        rows.append((clean_column, value))
+    def canonical_label(raw_label: str) -> str:
+        cleaned = clean_person_column_label(raw_label)
+        normalized = normalize_table_text(cleaned)
+        for canonical, aliases in canonical_aliases.items():
+            if normalized == normalize_table_text(canonical):
+                return canonical
+            if any(normalized == alias or normalized.endswith(" " + alias) for alias in aliases):
+                return canonical
+        return cleaned
+
+    # field -> value -> list sources. Dùng cấu trúc này để phát hiện xung đột.
+    merged: dict[str, dict[str, list[str]]] = {}
+    source_rows: list[str] = []
+    for record in records:
+        source = f"`{record['file']}` — sheet `{record['sheet']}` — dòng {record['row']}"
+        source_rows.append(source)
+        for raw_column, raw_value in record["values"].items():
+            label = canonical_label(raw_column)
+            label_norm = normalize_table_text(label)
+            if label_norm in {"", "stt", "tt"}:
+                continue
+            value = str(raw_value).strip()
+            if not value or normalize_table_text(value) in {"nan", "none"}:
+                continue
+            merged.setdefault(label, {}).setdefault(value, []).append(source)
+
+    preferred_fields = [
+        "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
+        "Số căn cước công dân", "Trình độ chuyên môn", "Trình độ LLCT",
+        "Ngày vào Đảng", "Ngày cấp CCCD", "Số sổ BHXH", "Số thẻ BHYT",
+        "Điện thoại liên lạc", "Mã ngạch/mã số chức danh nghề nghiệp", "Mã số",
+        "Phòng ban, đơn vị công tác", "Đơn vị công tác",
+    ]
+
+    ordered_labels: list[str] = []
+    for label in preferred_fields:
+        if label in merged and label not in ordered_labels:
+            ordered_labels.append(label)
+    for label in merged:
+        if label not in ordered_labels:
+            ordered_labels.append(label)
+
+    rows: list[tuple[str, str]] = []
+    conflict_notes: list[str] = []
+    for label in ordered_labels:
+        values_map = merged[label]
+        values = list(values_map.keys())
+        if len(values) == 1:
+            display_value = values[0]
+        else:
+            # Không tự chọn khi nhiều bảng có giá trị khác nhau.
+            display_value = " / ".join(values)
+            conflict_notes.append(
+                f"- **{label}** có {len(values)} giá trị khác nhau: " + "; ".join(values)
+            )
+        rows.append((label, display_value))
 
     table = "\n".join(
         f"| {index} | {label} | {value} |"
         for index, (label, value) in enumerate(rows, start=1)
     )
+
+    unique_sources = list(dict.fromkeys(source_rows))
+    source_block = "\n".join(f"- {source}" for source in unique_sources)
+    conflict_block = ""
+    if conflict_notes:
+        conflict_block = (
+            "\n\n**Cảnh báo dữ liệu cần đối chiếu:**\n" + "\n".join(conflict_notes)
+        )
+
     return (
-        f"**{item['person']}**\n\n"
+        f"**{person_name}**\n\n"
         "| STT | Nội dung | Thông tin |\n|---:|---|---|\n"
-        f"{table}\n\n"
-        f"**Nguồn bảng dữ liệu:** `{item['file']}` — sheet `{item['sheet']}` — dòng {item['row']}."
+        f"{table}"
+        f"{conflict_block}\n\n"
+        "**Nguồn bảng dữ liệu đã JOIN:**\n"
+        f"{source_block}"
     )
 
 def enrich_table_question_with_recent_context(
