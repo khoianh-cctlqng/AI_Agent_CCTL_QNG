@@ -2486,14 +2486,26 @@ def upload_document(
     save_database(database)
 
 
-def build_api_input(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+def build_api_input(
+    messages: list[dict[str, Any]],
+    *,
+    include_assistant_history: bool = True,
+) -> list[dict[str, str]]:
+    """Tạo ngữ cảnh hội thoại gửi lên mô hình.
+
+    Khi tra cứu kho dữ liệu, không đưa câu trả lời cũ của Agent vào lại ngữ cảnh.
+    Cách này ngăn nội dung và tên nguồn của file đã xóa bị tái sử dụng từ lịch sử.
+    """
+    allowed_roles = {"user", "assistant"} if include_assistant_history else {"user"}
+    limit = 12 if include_assistant_history else 6
     return [
         {
-            "role": message["role"],
-            "content": message["content"],
+            "role": str(message.get("role", "")),
+            "content": str(message.get("content", "")),
         }
-        for message in messages[-12:]
-        if message["role"] in {"user", "assistant"}
+        for message in messages[-limit:]
+        if message.get("role") in allowed_roles
+        and str(message.get("content", "")).strip()
     ]
 
 
@@ -2834,7 +2846,10 @@ def stream_openai_answer(
     else:
         model = SEARCH_MODEL
 
-    api_input = build_api_input(messages)
+    api_input = build_api_input(
+        messages,
+        include_assistant_history=not use_file_search,
+    )
     instructions = SYSTEM_INSTRUCTIONS
 
     # Dữ liệu có cấu trúc từ kho bảng được đưa vào cùng lượt trả lời để
@@ -3077,6 +3092,18 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
                 and str(item.get("name", "")).strip()
             ]
             active_document_text = ", ".join(active_document_names) or "Không có"
+
+            # Không gọi mô hình khi kho hiện hành không trả về căn cứ.
+            # Nếu vẫn gọi, mô hình có thể tái tạo dữ liệu hoặc tên nguồn cũ từ lịch sử.
+            if not structured_context:
+                st.session_state["rag_diagnostics"] = diagnostics
+                yield (
+                    "Chưa tìm thấy dữ liệu phù hợp trong các tệp hiện đang có "
+                    "trong kho dữ liệu dạng văn bản và kho dữ liệu dạng bảng.\n\n"
+                    "**Danh mục tệp văn bản hiện hành:** " + active_document_text
+                )
+                return
+
             instructions += f"""
 
 YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
