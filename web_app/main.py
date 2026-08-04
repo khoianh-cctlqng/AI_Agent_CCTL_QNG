@@ -3173,7 +3173,7 @@ st.markdown(
     <style>
     /* Chỉ chỉnh nút chọn tệp trong dropzone, tuyệt đối không áp dụng
        cho các nút xóa tệp đã chọn nằm bên trong stFileUploader. */
-    [data-testid="stFileUploaderDropzone"] button {
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
         position: relative !important;
         min-width: 8.8rem !important;
         height: 2.35rem !important;
@@ -3186,12 +3186,12 @@ st.markdown(
         overflow: hidden !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button * {
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] * {
         visibility: hidden !important;
         opacity: 0 !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button::before {
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::before {
         content: "＋" !important;
         visibility: visible !important;
         opacity: 1 !important;
@@ -3206,7 +3206,7 @@ st.markdown(
         pointer-events: none !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button::after {
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]::after {
         content: "Chọn tệp" !important;
         visibility: visible !important;
         opacity: 1 !important;
@@ -3222,19 +3222,37 @@ st.markdown(
         pointer-events: none !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] button:hover {
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]:hover {
         background: #f5f7fa !important;
         border-color: rgba(25, 118, 210, 0.45) !important;
     }
 
     /* Giữ nguyên nút bỏ tệp của Streamlit, hiển thị dạng dấu X màu xám. */
     [data-testid="stFileUploader"] button[kind="icon"],
+    [data-testid="stFileUploader"] button[data-testid="stBaseButton-headerNoPadding"],
     [data-testid="stFileUploader"] [data-testid="stBaseButton-headerNoPadding"] {
         color: #6b7280 !important;
         background: transparent !important;
         border: 0 !important;
-        min-width: auto !important;
+        min-width: 2rem !important;
+        width: 2rem !important;
+        height: 2rem !important;
+        padding: 0 !important;
+        font-size: initial !important;
         box-shadow: none !important;
+        overflow: visible !important;
+    }
+
+    [data-testid="stFileUploader"] button[data-testid="stBaseButton-headerNoPadding"] *,
+    [data-testid="stFileUploader"] [data-testid="stBaseButton-headerNoPadding"] * {
+        visibility: visible !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stFileUploader"] button[data-testid="stBaseButton-headerNoPadding"]::before,
+    [data-testid="stFileUploader"] button[data-testid="stBaseButton-headerNoPadding"]::after {
+        content: none !important;
+        display: none !important;
     }
     </style>
     """,
