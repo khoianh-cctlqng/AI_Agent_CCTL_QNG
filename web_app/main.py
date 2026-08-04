@@ -2558,6 +2558,13 @@ def search_vector_store_context(
                 or "Tài liệu không rõ tên"
             )
             mapped_filename = (filename_map or {}).get(file_id, "")
+
+            # Chỉ cho phép truy xuất các file đang còn trong danh mục kho hiện hành.
+            # File đã xóa khỏi giao diện nhưng còn sót trong Vector Store tuyệt đối
+            # không được đưa vào ngữ cảnh hoặc trích dẫn lại.
+            if filename_map is not None and file_id not in filename_map:
+                continue
+
             filename = mapped_filename or raw_filename
             # Không đưa file tên tạm/rác vào ngữ cảnh hoặc danh sách nguồn.
             # Nếu file có ánh xạ sang tên gốc hợp lệ thì vẫn được sử dụng.
@@ -3063,12 +3070,21 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
 - Không tự đổi tên tài liệu và không dùng tên tạm nếu đã có tên gốc.
 """
         else:
-            instructions += """
+            active_document_names = [
+                str(item.get("name", "")).strip()
+                for item in database.get("uploaded_files", [])
+                if str(item.get("openai_file_id", "")).strip()
+                and str(item.get("name", "")).strip()
+            ]
+            active_document_text = ", ".join(active_document_names) or "Không có"
+            instructions += f"""
 
 YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
-- Kết quả tìm kiếm thủ công chưa lấy được đoạn phù hợp.
-- Bắt buộc sử dụng công cụ file_search để tìm trực tiếp trong Vector Store trước khi trả lời.
-- Chỉ kết luận theo nội dung tìm được; không tự suy đoán.
+- Chưa tìm thấy đoạn phù hợp trong các file đang còn hiệu lực.
+- Không được dùng lại nội dung, tên file hoặc trích dẫn từ các lượt trò chuyện cũ.
+- Không được truy xuất file đã xóa hoặc file không có trong danh mục hiện hành.
+- Danh mục file văn bản hiện hành: {active_document_text}
+- Nếu không có căn cứ trong các file trên, trả lời ngắn gọn rằng chưa tìm thấy dữ liệu.
 """
 
     if deep_mode:
@@ -3100,17 +3116,11 @@ YÊU CẦU TRẢ LỜI THEO KHO TÀI LIỆU:
         "max_output_tokens": max_output_tokens,
     }
 
-    if use_file_search and vector_store_id:
-        request["tools"] = [
-            {
-                "type": "file_search",
-                "vector_store_ids": [vector_store_id],
-                "max_num_results": (
-                    20 if deep_mode else (5 if fast_mode else 8)
-                ),
-            }
-        ]
-        diagnostics["native_file_search_enabled"] = True
+    # Không bật file_search gốc trên toàn Vector Store vì công cụ này không
+    # lọc được theo danh mục file hiện hành và có thể tìm lại file đã xóa nhưng
+    # còn sót trên máy chủ. Ứng dụng chỉ dùng kết quả tìm kiếm thủ công đã được
+    # khóa theo allowlist openai_file_id trong database["uploaded_files"].
+    diagnostics["native_file_search_enabled"] = False
 
     st.session_state["rag_diagnostics"] = diagnostics
 
@@ -3548,6 +3558,23 @@ with st.sidebar:
                                 if str(item.get("openai_file_id", ""))
                                 != pending_file_id
                             ]
+
+                            # Xóa các câu trả lời cũ có trích dẫn file vừa xóa để
+                            # mô hình không tái sử dụng nguồn đó từ lịch sử chat.
+                            deleted_name_folded = pending_file_name.casefold()
+                            for conv in database.get("conversations", {}).values():
+                                conv["messages"] = [
+                                    message
+                                    for message in conv.get("messages", [])
+                                    if not (
+                                        message.get("role") == "assistant"
+                                        and deleted_name_folded
+                                        and deleted_name_folded in str(
+                                            message.get("content", "")
+                                        ).casefold()
+                                    )
+                                ]
+
                             save_database(database)
                             st.session_state.pop(
                                 "pending_delete_document",
