@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import unicodedata
+from difflib import SequenceMatcher
 import httpx
 import uuid
 from datetime import datetime
@@ -2233,20 +2234,21 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
 
     matches.sort(key=lambda item: item["score"], reverse=True)
     best_score = matches[0]["score"]
-    best = [item for item in matches if item["score"] == best_score]
 
-    # Nếu có nhiều người khác nhau cùng đạt mức khớp cao nhất thì không tự JOIN.
-    person_groups: dict[str, list[dict[str, Any]]] = {}
-    for item in best:
-        person_groups.setdefault(item["person_key"], []).append(item)
-    if len(person_groups) > 1:
-        names = sorted({item["person"] for item in best})
+    # Xác định người đích theo bản ghi có điểm cao nhất, sau đó lấy TẤT CẢ bản ghi
+    # cùng họ tên trong toàn bộ file/sheet. Không chỉ lấy các bản ghi có cùng điểm
+    # cao nhất vì cách đặt câu hỏi có thể làm điểm khớp khác nhau giữa các bảng.
+    top_candidates = [item for item in matches if item["score"] == best_score]
+    top_person_keys = {item["person_key"] for item in top_candidates}
+    if len(top_person_keys) > 1:
+        names = sorted({item["person"] for item in top_candidates})
         return (
             "Tìm thấy nhiều người có tên gần giống. Vui lòng nhập đầy đủ họ và tên "
             "hoặc bổ sung ngày sinh/CCCD:\n- " + "\n- ".join(names[:10])
         )
 
-    records = next(iter(person_groups.values()))
+    target_person_key = next(iter(top_person_keys))
+    records = [item for item in matches if item["person_key"] == target_person_key]
     person_name = records[0]["person"]
 
     def clean_person_column_label(label: str) -> str:
@@ -2334,11 +2336,78 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
             return len(re.sub(r"\D", "", compact)) >= 6
         return True
 
-    # field -> value -> list sources. Dùng cấu trúc này để phát hiện xung đột.
+    def short_source_name(file_name: str) -> str:
+        """Rút gọn tên file trong cột nguồn nhưng vẫn đủ nhận diện."""
+        path = Path(str(file_name))
+        stem = path.stem
+        suffix = path.suffix
+
+        # Bỏ tiền tố ngày/phiên bản thường gặp và hậu tố tên cơ quan lặp lại.
+        stem = re.sub(r"^(?:20\d{2}[_-])?\d{1,2}[_-]\d{1,2}[_-]", "", stem)
+        stem = re.sub(r"^(?:20\d{2}[_-])?\d{1,2}[_-]", "", stem)
+        stem = re.sub(r"_(?:CCTL_?QNG|QNG)$", "", stem, flags=re.IGNORECASE)
+
+        replacements = (
+            (r"Ly_Lich_Trich_Ngang", "Ly_lich"),
+            (r"Danh_sach", "DS"),
+            (r"Ma_so", "Ma_so"),
+            (r"Cong_chuc_Vien_chuc", "CCVC"),
+        )
+        for pattern, replacement in replacements:
+            stem = re.sub(pattern, replacement, stem, flags=re.IGNORECASE)
+
+        stem = re.sub(r"[_-]+", "_", stem).strip("_")
+        if len(stem) > 28:
+            stem = stem[:25].rstrip("_") + "…"
+        return f"{stem}{suffix}"
+
+    def compact_source(record: dict[str, Any]) -> str:
+        short_file = short_source_name(str(record.get("file", "")))
+        sheet = str(record.get("sheet", "")).strip()
+        row = record.get("row", "")
+        return f"`{short_file}` · `{sheet}` · d.{row}"
+
+    def normalized_value_for_compare(value: str) -> str:
+        """Chuẩn hóa để nhận diện hai nội dung trùng hoặc gần tương tự."""
+        normalized = normalize_table_text(value)
+        normalized = re.sub(r"\b(?:tinh|thanh pho|tp|xa|phuong|thi tran)\b", " ", normalized)
+        normalized = re.sub(r"[^0-9a-z ]", " ", normalized)
+        return " ".join(normalized.split())
+
+    def values_are_equivalent(label: str, left: str, right: str) -> bool:
+        """Xác định giá trị trùng/tương tự; tránh gộp nhầm số định danh và ngày."""
+        left_norm = normalized_value_for_compare(left)
+        right_norm = normalized_value_for_compare(right)
+        if not left_norm or not right_norm:
+            return False
+        if left_norm == right_norm:
+            return True
+
+        strict_fields = {
+            "Số căn cước công dân", "Ngày sinh", "Ngày cấp CCCD",
+            "Ngày vào Đảng", "Số sổ BHXH", "Số thẻ BHYT",
+            "Điện thoại liên lạc", "Mã số",
+            "Mã ngạch/mã số chức danh nghề nghiệp",
+        }
+        if label in strict_fields:
+            return False
+
+        # Một nội dung là phần rút gọn của nội dung kia: giữ bản dài, đầy đủ hơn.
+        if min(len(left_norm), len(right_norm)) >= 5:
+            if left_norm in right_norm or right_norm in left_norm:
+                return True
+
+        # Chỉ gộp gần đúng với chuỗi chữ đủ dài để hạn chế gộp nhầm.
+        if min(len(left_norm), len(right_norm)) < 10:
+            return False
+        return SequenceMatcher(None, left_norm, right_norm).ratio() >= 0.90
+
+    # field -> value -> list sources. Sau khi thu thập sẽ gom các giá trị
+    # trùng/tương tự và ưu tiên giữ nội dung dài, đầy đủ hơn.
     merged: dict[str, dict[str, list[str]]] = {}
     source_rows: list[str] = []
     for record in records:
-        source = f"`{record['file']}` — sheet `{record['sheet']}` — dòng {record['row']}"
+        source = compact_source(record)
         source_rows.append(source)
         for raw_column, raw_value in record["values"].items():
             label = canonical_label(raw_column)
@@ -2348,7 +2417,22 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
             value = str(raw_value).strip()
             if not value_matches_field(label, value):
                 continue
-            merged.setdefault(label, {}).setdefault(value, []).append(source)
+
+            values_map = merged.setdefault(label, {})
+            equivalent_key = next(
+                (existing for existing in values_map if values_are_equivalent(label, existing, value)),
+                None,
+            )
+            if equivalent_key is None:
+                values_map[value] = [source]
+                continue
+
+            # Ưu tiên nội dung dài hơn. Nguồn của cả hai bản vẫn được giữ lại.
+            existing_sources = values_map.pop(equivalent_key)
+            preferred_value = value if len(value.strip()) > len(equivalent_key.strip()) else equivalent_key
+            combined_sources = list(dict.fromkeys(existing_sources + [source]))
+            values_map.setdefault(preferred_value, []).extend(combined_sources)
+            values_map[preferred_value] = list(dict.fromkeys(values_map[preferred_value]))
 
     preferred_fields = [
         "Họ và tên", "Ngày sinh", "Chức vụ", "Quê quán",
@@ -2357,6 +2441,20 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
         "Điện thoại liên lạc", "Mã ngạch/mã số chức danh nghề nghiệp", "Mã số",
         "Phòng ban, đơn vị công tác", "Đơn vị công tác",
     ]
+
+    # Nếu câu hỏi yêu cầu một trường cụ thể, ưu tiên đưa trường đó lên đầu bảng
+    # nhưng vẫn giữ toàn bộ các trường còn lại đã JOIN được.
+    requested_field = detect_requested_table_field(question)
+    requested_to_canonical = {
+        "CCCD": "Số căn cước công dân",
+        "Số điện thoại": "Điện thoại liên lạc",
+        "Mã ngạch": "Mã ngạch/mã số chức danh nghề nghiệp",
+        "Mã số": "Mã số",
+    }
+    requested_canonical = requested_to_canonical.get(requested_field, requested_field)
+    if requested_canonical in preferred_fields:
+        preferred_fields.remove(requested_canonical)
+        preferred_fields.insert(0, requested_canonical)
 
     ordered_labels: list[str] = []
     for label in preferred_fields:
@@ -2400,10 +2498,11 @@ def lookup_person_profile(database: dict[str, Any], question: str) -> str | None
 
     return (
         f"**{person_name}**\n\n"
-        "| STT | Nội dung | Thông tin | Nguồn (file — sheet — dòng) |\n"
+        "| STT | Nội dung | Thông tin | Nguồn |\n"
         "|---:|---|---|---|\n"
         f"{table}"
         f"{conflict_block}\n\n"
+        f"\n\n*Đã hợp nhất {len(records)} bản ghi từ {len(unique_sources)} nguồn bảng.*\n\n"
         "**Nguồn bảng dữ liệu đã JOIN:**\n"
         f"{source_block}"
     )
@@ -3505,6 +3604,23 @@ st.markdown(
     [data-testid="stFileUploader"] button[data-testid="stBaseButton-headerNoPadding"]::after {
         content: none !important;
         display: none !important;
+    }
+
+    /* Bảng hồ sơ JOIN: cột nguồn ngắn, nhỏ và ít chiếm không gian hơn. */
+    [data-testid="stMarkdownContainer"] table th:nth-child(1),
+    [data-testid="stMarkdownContainer"] table td:nth-child(1) {
+        width: 3.2rem !important;
+        min-width: 3.2rem !important;
+        text-align: center !important;
+    }
+    [data-testid="stMarkdownContainer"] table th:nth-child(4),
+    [data-testid="stMarkdownContainer"] table td:nth-child(4) {
+        width: 22% !important;
+        max-width: 15rem !important;
+        font-size: 0.82rem !important;
+        line-height: 1.25 !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
     }
     </style>
     """,
