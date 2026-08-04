@@ -629,7 +629,7 @@ def render_assistant_content(content: str) -> None:
 
 
 # =========================================================
-# THIẾT LẬP TRANG
+# THIẾT LẬP TRANG - V36 TƯƠNG THÍCH EDGE/CHROME/MOBILE
 # =========================================================
 st.set_page_config(
     page_title=APP_TITLE,
@@ -650,20 +650,41 @@ st.markdown(
 
     #MainMenu, footer {visibility: hidden;}
 
+    /* Nền tảng tương thích Edge/Chrome/điện thoại.
+       Không khóa chiều ngang của toàn ứng dụng vì có thể làm bảng và
+       các khối React bị ép thành một cột rất hẹp trên một số máy. */
+    html, body, [data-testid="stAppViewContainer"] {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
     [data-testid="stAppViewContainer"] {
         background: #ffffff;
         overflow-y: auto !important;
-        overflow-x: hidden !important;
+        overflow-x: auto !important;
     }
 
     [data-testid="stMain"] {
+        width: 100% !important;
+        min-width: 0 !important;
         overflow-y: auto !important;
-        overflow-x: hidden !important;
+        overflow-x: visible !important;
+    }
+
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stVerticalBlock"],
+    [data-testid="stHorizontalBlock"],
+    [data-testid="column"],
+    [data-testid="stMarkdownContainer"],
+    div[data-testid="stChatMessage"] > div {
+        min-width: 0 !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
     }
 
     [data-testid="stHeader"] {
         background: rgba(255,255,255,0.94);
-        backdrop-filter: blur(12px);
         border-bottom: 1px solid rgba(230,232,235,0.7);
     }
 
@@ -678,9 +699,41 @@ st.markdown(
     }
 
     .block-container {
+        width: 100% !important;
         max-width: 1050px;
+        min-width: 0 !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
         padding-top: 0.5rem;
         padding-bottom: 3rem;
+        box-sizing: border-box !important;
+    }
+
+    /* Bảng Markdown luôn giữ cấu trúc hàng/cột; khi màn hình hẹp thì
+       cuộn ngang thay vì ép từng từ thành các ô xếp dọc. */
+    [data-testid="stMarkdownContainer"] {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    [data-testid="stMarkdownContainer"] table {
+        display: table !important;
+        width: 100% !important;
+        min-width: 620px;
+        table-layout: auto !important;
+        border-collapse: collapse !important;
+    }
+
+    [data-testid="stMarkdownContainer"] table th,
+    [data-testid="stMarkdownContainer"] table td {
+        white-space: normal !important;
+        overflow-wrap: break-word !important;
+        word-break: normal !important;
+        vertical-align: top !important;
+    }
+
+    img, svg, canvas {
+        max-width: 100% !important;
     }
 
     /* Thông tin thương hiệu đặt trong sidebar trái */
@@ -871,6 +924,10 @@ st.markdown(
             padding-left: 0.75rem;
             padding-right: 0.75rem;
         }
+
+        [data-testid="stMarkdownContainer"] table {
+            min-width: 560px;
+        }
     }
 
 
@@ -998,6 +1055,17 @@ st.markdown(
         [data-testid="stChatInputTextArea"] {
             font-size: 0.84rem !important;
             line-height: 1.12 !important;
+        }
+
+        div[data-testid="stChatMessage"] {
+            width: 100% !important;
+            max-width: 100% !important;
+            padding: 0.68rem 0.72rem !important;
+        }
+
+        [data-testid="stMarkdownContainer"] table {
+            min-width: 520px;
+            font-size: 0.82rem !important;
         }
     }
 
@@ -3607,14 +3675,14 @@ st.markdown(
     }
 
     /* Bảng hồ sơ JOIN: cột nguồn ngắn, nhỏ và ít chiếm không gian hơn. */
-    [data-testid="stMarkdownContainer"] table th:nth-child(1),
-    [data-testid="stMarkdownContainer"] table td:nth-child(1) {
+    [data-testid="stMarkdownContainer"] table:has(th:nth-child(4)) th:nth-child(1),
+    [data-testid="stMarkdownContainer"] table:has(th:nth-child(4)) td:nth-child(1) {
         width: 3.2rem !important;
         min-width: 3.2rem !important;
         text-align: center !important;
     }
-    [data-testid="stMarkdownContainer"] table th:nth-child(4),
-    [data-testid="stMarkdownContainer"] table td:nth-child(4) {
+    [data-testid="stMarkdownContainer"] table:has(th:nth-child(4)) th:nth-child(4),
+    [data-testid="stMarkdownContainer"] table:has(th:nth-child(4)) td:nth-child(4) {
         width: 22% !important;
         max-width: 15rem !important;
         font-size: 0.82rem !important;
