@@ -2147,7 +2147,8 @@ def is_person_profile_query(question: str) -> bool:
     """Nhận diện câu hỏi về một người; ưu tiên trước tra cứu công trình."""
     normalized = normalize_table_text(question)
     person_terms = (
-        "la ai", "thong tin ve", "ho so", "ly lich", "ngay sinh",
+        "la ai", "thong tin ve", "thong tin cua", "du lieu ve",
+        "du lieu cua", "du lieu", "ho so", "ly lich", "ngay sinh",
         "chuc vu", "chuc danh", "que quan", "trinh do", "cccd",
         "bhxh", "bhyt", "dien thoai", "so lien lac", "vao dang",
     )
@@ -2267,6 +2268,37 @@ def lookup_structured_table(
     person_profile_answer = lookup_person_profile(database, question)
     if person_profile_answer:
         return person_profile_answer
+
+    # Dự phòng: câu hỏi ngắn như “Dữ liệu về Khôi Anh” vẫn phải tra bảng nhân sự.
+    # Nếu tên người trong câu hỏi khớp rõ với cột Họ và tên thì truy xuất hồ sơ,
+    # không chờ phải có đúng các từ khóa “lý lịch”, “ngày sinh”...
+    if database.get("table_files"):
+        normalized_question = normalize_table_text(question)
+        if any(term in normalized_question for term in ("du lieu", "thong tin", "ve", "cua")):
+            for file_info in database.get("table_files", []):
+                file_path = resolve_table_path(file_info)
+                if not file_path.exists():
+                    continue
+                try:
+                    sheets = read_table_file_fast(file_path)
+                except Exception:
+                    continue
+                found_person = False
+                for dataframe in sheets.values():
+                    if dataframe is None or getattr(dataframe, "empty", True):
+                        continue
+                    name_column = _resolve_structured_column(dataframe, "Họ và tên")
+                    if not name_column:
+                        continue
+                    if any(_person_match_score(question, raw_name) > 0 for raw_name in dataframe[name_column].tolist()):
+                        found_person = True
+                        break
+                if found_person:
+                    # Gọi trực tiếp logic hồ sơ bằng cách bổ sung từ khóa an toàn.
+                    person_profile_answer = lookup_person_profile(database, "thông tin về " + question)
+                    if person_profile_answer:
+                        return person_profile_answer
+                    break
 
     infrastructure_answer = lookup_infrastructure_table(database, question)
     if infrastructure_answer:
